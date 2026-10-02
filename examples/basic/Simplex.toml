@@ -1,3 +1,8 @@
+# This example runs on a local Sequentia chain: `sequentiad` on PATH, or set
+# `node_bin`. Comment out the `[regtest]` table below to run on Liquid regtest.
+[regtest]
+chain = "sequentia"
+
 # DEFAULT CONFIG 
 
 # [build]
