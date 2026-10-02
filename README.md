@@ -7,6 +7,8 @@
 
 # Smplx
 
+> This is Sequentia's copy of Simplex. [SEQUENTIA.md](SEQUENTIA.md) says what differs on Sequentia and how to use it there.
+
 **A blazingly-fast, ux-first Simplicity development framework.**
 
 ## What
