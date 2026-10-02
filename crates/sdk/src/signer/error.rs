@@ -86,6 +86,10 @@ pub enum SignerError {
     #[error("Nothing names the fee asset: set one with `with_fee_asset` (the transaction moves: [{0}])")]
     FeeAssetUnset(String),
 
+    /// Error indicating a send named no asset on a network where no asset is a default.
+    #[error("This network has no default asset: name the asset to send with `send_asset`")]
+    AssetUnnamed,
+
     /// Error indicating that the network does not accept fees in this asset, or that no
     /// exchange rate for it is known.
     #[error("Fees cannot be paid in asset {0}: the network does not accept it, or no exchange rate for it is known")]

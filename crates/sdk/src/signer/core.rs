@@ -388,13 +388,18 @@ impl Signer {
         })
     }
 
-    /// Composes, funds, and broadcasts a standard network transaction sending the specified value of the primary policy asset.
+    /// Composes, funds, and broadcasts a transaction sending `amount` of the network's default
+    /// asset, its policy asset. A network with no default asset refuses it: name the asset with
+    /// [`Self::send_asset`].
     ///
     /// # Errors
-    /// Returns a `SignerError` if compiling the inputs fails, there are insufficient funds/fees, or broadcast is rejected.
+    /// Returns `AssetUnnamed` on a network with no default asset, and otherwise a `SignerError` if
+    /// compiling the inputs fails, there are insufficient funds/fees, or broadcast is rejected.
     #[cfg(feature = "provider")]
     pub fn send(&self, to: Script, amount: u64) -> Result<TxReceipt<'_>, SignerError> {
-        self.send_asset(to, amount, self.network.policy_asset())
+        let asset = self.network.default_asset().ok_or(SignerError::AssetUnnamed)?;
+
+        self.send_asset(to, amount, asset)
     }
 
     /// Composes, funds, and broadcasts a transaction sending `amount` of `asset`.
