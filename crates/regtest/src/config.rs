@@ -1,15 +1,15 @@
 use std::fs::OpenOptions;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::error::RegtestError;
 
 pub const DEFAULT_REGTEST_MNEMONIC: &str = "exist carry drive collect lend cereal occur much tiger just involve mean";
 pub const DEFAULT_BITCOINS: u64 = 10_000_000;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RegtestConfig {
     pub mnemonic: String,
@@ -18,6 +18,10 @@ pub struct RegtestConfig {
     pub esplora_port: Option<u16>,
     pub rpc_user: Option<String>,
     pub rpc_password: Option<String>,
+    /// The node binary. Unset, it is looked up on `PATH` by its default name.
+    pub node_bin: Option<PathBuf>,
+    /// The indexer binary. Unset, it is looked up on `PATH` by its default name.
+    pub electrs_bin: Option<PathBuf>,
 }
 
 impl RegtestConfig {
@@ -44,6 +48,8 @@ impl Default for RegtestConfig {
             esplora_port: None,
             rpc_user: None,
             rpc_password: None,
+            node_bin: None,
+            electrs_bin: None,
         }
     }
 }
@@ -64,6 +70,7 @@ mod tests {
                 esplora_port = 3000
                 rpc_user = "user"
                 rpc_password = "password"
+                node_bin = "/opt/elements/bin/elementsd"
             "#,
         )
         .expect("regtest config should be writable");
@@ -76,6 +83,11 @@ mod tests {
         assert_eq!(loaded.esplora_port, Some(3000));
         assert_eq!(loaded.rpc_user.as_deref(), Some("user"));
         assert_eq!(loaded.rpc_password.as_deref(), Some("password"));
+        assert_eq!(
+            loaded.node_bin.as_deref(),
+            Some(Path::new("/opt/elements/bin/elementsd"))
+        );
+        assert!(loaded.electrs_bin.is_none());
         assert!(defaults.rpc_port.is_none());
         assert!(defaults.esplora_port.is_none());
 

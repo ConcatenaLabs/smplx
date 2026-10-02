@@ -66,6 +66,8 @@ rpc_port = 18443
 esplora_port = 3000
 rpc_user = "user"
 rpc_password = "password"
+node_bin = "<path to elementsd; default: elementsd on PATH>"
+electrs_bin = "<path to electrs; default: electrs on PATH>"
 
 [test]
 mnemonic = "exist carry drive collect lend cereal occur much tiger just involve mean"
@@ -97,10 +99,13 @@ Where:
   - `esplora_port` - The port Electrs will listen on.
   - `rpc_user` - Elements regtest RPC username.
   - `rpc_password` - Elements regtest RPC password.
+  - `node_bin` - The node binary. Without it, `elementsd` is looked up on `PATH`.
+  - `electrs_bin` - The indexer binary. Without it, `electrs` is looked up on `PATH`.
 - `test` (`simplex test` config)
   - `mnemonic` - The signer's mnemonic internal regtest will send initial funds to.
   - `bitcoins` - Initial coins available to the signer.
   - `verbosity` - Simplicity pruning log level.
+  - The regtest `simplex test` starts uses the binaries named in `[regtest]`.
   - `esplora`
     - `url` - Esplora API endpoint url.
     - `network` - Esplora network type (`Liquid`, `LiquidTestnet`, `ElementsRegtest`).
