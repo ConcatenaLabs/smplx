@@ -5,6 +5,8 @@ use simplicityhl::simplicity::hashes::{Hash, sha256};
 
 use elements_miniscript::bitcoin::NetworkKind;
 
+use crate::program::BudgetRule;
+
 use crate::constants::{
     LIQUID_DEFAULT_REGTEST_ASSET_STR, LIQUID_POLICY_ASSET_STR, LIQUID_TESTNET_POLICY_ASSET_STR,
     SEQUENTIA_TESTNET_GENESIS_STR, SEQUENTIA_TESTNET_POLICY_ASSET_STR,
@@ -41,6 +43,14 @@ pub static LIQUID_REGTEST_GENESIS: std::sync::LazyLock<elements::BlockHash> = st
         0x6a, 0xd9, 0x15, 0xc8, 0xd9, 0xb5, 0x83, 0xca, 0xc2, 0x70, 0x6b, 0x2a, 0x90, 0x00,
     ])
 });
+
+/// Sequentia's Simplicity budget: four weight units per witness byte
+/// (`SIMPLICITY_BUDGET_PER_WITNESS_BYTE` in the node), and an annex of up to 100,000 bytes relays
+/// on a Simplicity leaf (`MAX_STANDARD_SIMPLICITY_ANNEX_SIZE`).
+pub const SEQUENTIA_SIMPLICITY_BUDGET: BudgetRule = BudgetRule {
+    per_witness_byte: 4,
+    max_standard_annex: 100_000,
+};
 
 /// Represents the target network configuration for Simplicity interactions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -158,6 +168,18 @@ impl SimplicityNetwork {
         }
     }
 
+    /// How this network turns a Simplicity spend's witness into execution budget, and the
+    /// largest annex it relays to raise it.
+    #[must_use]
+    pub fn simplicity_budget(&self) -> BudgetRule {
+        match self {
+            Self::Liquid | Self::LiquidTestnet | Self::ElementsRegtest { .. } | Self::ElementsCustom { .. } => {
+                BudgetRule::ELEMENTS
+            }
+            Self::SequentiaTestnet | Self::SequentiaRegtest { .. } => SEQUENTIA_SIMPLICITY_BUDGET,
+        }
+    }
+
     /// Returns the address parameters associated with the current enum variant.
     #[must_use]
     pub const fn address_params(&self) -> &'static elements::AddressParams {
@@ -243,6 +265,8 @@ mod tests {
         );
         assert_eq!(sequentia.address_params().bech_hrp.as_str(), "tb");
         assert_eq!(sequentia.address_params().blech_hrp.as_str(), "tsqb");
+        assert_eq!(sequentia.simplicity_budget(), SEQUENTIA_SIMPLICITY_BUDGET);
+        assert_eq!(liquid.simplicity_budget(), BudgetRule::ELEMENTS);
         assert_eq!(NetworkKind::from(&testnet), NetworkKind::Test);
         assert_eq!(NetworkKind::from(regtest), NetworkKind::Test);
     }

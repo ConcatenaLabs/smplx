@@ -119,6 +119,19 @@ pub enum SignerError {
     #[error("Failed to construct a wpkh address: {0}")]
     WpkhAddressConstruction(#[from] elements_miniscript::Error),
 
+    /// Error indicating a Simplicity program costs more than its spend can be given.
+    #[error("Covenant input {index} cannot be given its budget: {source}")]
+    Budget {
+        /// The index of the input whose program costs too much.
+        index: usize,
+        /// What it costs, and what it could be given.
+        source: crate::program::BudgetError,
+    },
+
+    /// Error indicating a program's size kept changing with its padding, so no annex settled.
+    #[error("The padding of a covenant input did not settle: its program changed with its annex")]
+    PaddingUnsettled,
+
     /// Error indicating an input of the transaction lacks the output it spends, which a
     /// taproot signature commits to.
     #[error("Input {0} does not carry the output it spends")]

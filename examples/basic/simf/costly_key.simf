@@ -1,0 +1,31 @@
+/* A one-key spend that also does work: the fixed-root one-key program, with a
+ * 256-step hash loop before the signature check. The loop is one shared node
+ * in the program but runs 256 times, so the program's cost bound outgrows what
+ * its witness earns, and a spend of it needs padding.
+ */
+fn tapdata(pk: Pubkey) -> u256 {
+    let ctx: Ctx8 = jet::tapdata_init();
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_32(ctx, pk);
+    jet::sha_256_ctx_8_finalize(ctx)
+}
+
+// Adds the counter to the hash; finalizes after the last step.
+fn hash_step(ctx: Ctx8, unused: (), byte: u8) -> Either<u256, Ctx8> {
+    let ctx: Ctx8 = jet::sha_256_ctx_8_add_1(ctx, byte);
+    match jet::all_8(byte) {
+        true => Left(jet::sha_256_ctx_8_finalize(ctx)),
+        false => Right(ctx),
+    }
+}
+
+fn main() {
+    let pk: Pubkey = witness::PK;
+    assert!(jet::eq_256(tapdata(pk), unwrap(jet::tappath(0))));
+
+    // SHA-256 of the bytes 0x00 to 0xff.
+    let out: Either<u256, Ctx8> = for_while::<hash_step>(jet::sha_256_ctx_8_init(), ());
+    let expected: u256 = 0x40aff2e9d2d8922e47afd4648e6967497158785fbd1da870e7110266bf944880;
+    assert!(jet::eq_256(expected, unwrap_left::<Ctx8>(out)));
+
+    jet::bip_0340_verify((pk, jet::sig_all_hash()), witness::SIG);
+}

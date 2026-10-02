@@ -8,7 +8,7 @@ use simplicityhl::elements::pset::PartiallySignedTransaction;
 use simplicityhl::elements::{Address, Script, Transaction, TxOut, taproot};
 use simplicityhl::simplicity::bitcoin::{XOnlyPublicKey, secp256k1};
 use simplicityhl::simplicity::jet::elements::{ElementsEnv, ElementsUtxo};
-use simplicityhl::simplicity::{BitMachine, RedeemNode, Value, leaf_version};
+use simplicityhl::simplicity::{BitMachine, Cost, RedeemNode, Value, leaf_version};
 use simplicityhl::{Arguments, Parameters, WitnessTypes, WitnessValues};
 use simplicityhl::{CompiledProgram, UnstableFeatures};
 
@@ -16,6 +16,7 @@ use crate::global::GlobalConfig;
 use crate::program::logger::ProgramLogger;
 
 use super::arguments::ArgumentsTrait;
+use super::budget::ANNEX_TAG;
 use super::error::ProgramError;
 
 use crate::provider::SimplicityNetwork;
@@ -64,6 +65,20 @@ pub trait ProgramTrait: DynClone {
         network: &SimplicityNetwork,
     ) -> Result<(Arc<RedeemNode>, Value), ProgramError>;
 
+    /// Executes the program against the transaction and returns its witness stack (program
+    /// witness, pruned program, commitment root, control block) with the pruned program's cost
+    /// bound. An annex, when the spend needs one, goes after the stack.
+    ///
+    /// # Errors
+    /// Returns a `ProgramError` if program execution or constructing the control block fails.
+    fn finalize_spend(
+        &self,
+        pst: &PartiallySignedTransaction,
+        witness: &WitnessValues,
+        input_index: usize,
+        network: &SimplicityNetwork,
+    ) -> Result<FinalizedSpend, ProgramError>;
+
     /// Finalizes and returns `pruned_witness` as output after executing the program on certain parameters.
     ///
     /// # Errors
@@ -74,7 +89,18 @@ pub trait ProgramTrait: DynClone {
         witness: &WitnessValues,
         input_index: usize,
         network: &SimplicityNetwork,
-    ) -> Result<Vec<Vec<u8>>, ProgramError>;
+    ) -> Result<Vec<Vec<u8>>, ProgramError> {
+        Ok(self.finalize_spend(pst, witness, input_index, network)?.stack)
+    }
+}
+
+/// A Simplicity spend's witness stack and the cost bound of the program it reveals.
+#[derive(Debug, Clone)]
+pub struct FinalizedSpend {
+    /// Program witness, pruned program, commitment root, control block.
+    pub stack: Vec<Vec<u8>>,
+    /// The pruned program's static cost bound.
+    pub cost: Cost,
 }
 
 /// Represents a program structure containing its public key, compiled program, and associated storage.
@@ -131,8 +157,17 @@ impl ProgramTrait for Program {
             });
         }
 
+        // The annex this input carries, which a full signature hash commits to.
+        let tx = pst.extract_tx()?;
+        let annex = tx.input[input_index]
+            .witness
+            .script_witness
+            .last()
+            .filter(|item| item.first() == Some(&ANNEX_TAG))
+            .map(|item| item[1..].to_vec());
+
         Ok(ElementsEnv::new(
-            Arc::new(pst.extract_tx()?),
+            Arc::new(tx),
             utxos
                 .iter()
                 .map(|utxo| ElementsUtxo {
@@ -144,7 +179,7 @@ impl ProgramTrait for Program {
             u32::try_from(input_index)?,
             cmr,
             self.control_block()?,
-            None,
+            annex,
             genesis_hash,
         ))
     }
@@ -181,24 +216,27 @@ impl ProgramTrait for Program {
         Ok((pruned, result))
     }
 
-    fn finalize(
+    fn finalize_spend(
         &self,
         pst: &PartiallySignedTransaction,
         witness: &WitnessValues,
         input_index: usize,
         network: &SimplicityNetwork,
-    ) -> Result<Vec<Vec<u8>>, ProgramError> {
+    ) -> Result<FinalizedSpend, ProgramError> {
         let pruned = self.execute(pst, witness, input_index, network)?.0;
 
         let (simplicity_program_bytes, simplicity_witness_bytes) = pruned.to_vec_with_witness();
         let cmr = pruned.cmr();
 
-        Ok(vec![
-            simplicity_witness_bytes,
-            simplicity_program_bytes,
-            cmr.as_ref().to_vec(),
-            self.control_block()?.serialize(),
-        ])
+        Ok(FinalizedSpend {
+            stack: vec![
+                simplicity_witness_bytes,
+                simplicity_program_bytes,
+                cmr.as_ref().to_vec(),
+                self.control_block()?.serialize(),
+            ],
+            cost: pruned.bounds().cost,
+        })
     }
 }
 
