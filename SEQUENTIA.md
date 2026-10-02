@@ -19,6 +19,7 @@ networks, the regtest chain).
 | Transaction encoding | A Sequentia issuance carries one more byte than an Elements one, the asset's denomination. The workspace patches crates.io `elements` to the rust-elements that [SWK](https://github.com/ConcatenaLabs/SWK) vendors, with its `sequentia` feature on, so every transaction parses and serialises as the node does. A build of this repository speaks Sequentia's encoding only |
 | Networks | `SimplicityNetwork::SequentiaTestnet` (address prefixes `tb` and, for confidential addresses, `tsqb`) and `SimplicityNetwork::SequentiaRegtest { policy_asset, genesis_hash }` for a local chain. The mainnet is not defined: its genesis is a placeholder until it launches |
 | Fees | Fees are payable in any asset the node accepts. The signer pays in the asset set with `Signer::with_fee_asset`, or else in the one asset a transaction moves; when a transaction moves several assets and none is set, it refuses. No asset, the policy asset included, is a fallback. The fee is computed in the node's reference unit and converted at the node's exchange rate for that asset, rounding up; the rate comes from `Signer::with_fee_exchange_rate` or from the provider. Fees are charged on full weight, as a Sequentia node does by default |
+| Simplicity budget | A spend earns four weight units of execution budget per byte of its witness, plus 50, up to 4,000,050; Elements gives one. An annex of up to 100,000 bytes relays on a Simplicity leaf. The signer pads a program that costs more than its witness earns (see below) |
 | Change | Explicit. It is blinded only when the transaction spends a confidential input and has no other blinded output, because it cannot balance otherwise. An output is confidential only when the holder asks for it with a blinding key |
 | Local chain | `sequentiad` runs two nodes: a Bitcoin-mode regtest parent and an `elementsregtest` custom chain anchored to it, so headers carry a Bitcoin anchor as on every live chain. Simplicity is active from genesis, addresses are unblinded and the open fee market is on. The chain is read over the node's RPC alone; no indexer runs |
 
@@ -110,6 +111,28 @@ descriptors record: `jet::tappath(0)` is then the data leaf, wherever else the
 branch sits. `examples/basic/tests/tree_test.rs` builds that branch with a
 tapscript exit beside it and spends each leaf.
 
+## The budget and padding
+
+A Simplicity program carries a static bound on its cost, and a node runs it only
+when that bound fits the budget its input's witness earns. Before it signs a
+spend, the signer finalizes every program, compares each cost bound with the
+budget its witness stack earns under the network's rule
+(`SimplicityNetwork::simplicity_budget`), and pads a program that falls short
+with the smallest annex that covers it: a last witness item tagged `0x50`, which
+the program never reads. Beyond the largest annex that relays, it refuses the
+spend with `SignerError::Budget`.
+
+A full signature hash commits to every input's annex, so the signer fixes every
+annex first and signs after: one pass learns each program's cost and size,
+and, when one needs padding, a second signs with each annex in place.
+
+To build a spend by hand, `ProgramTrait::finalize_spend` returns the witness
+stack and the program's cost bound, and `BudgetRule::padding` the annex. Put the
+annex in the input's `final_script_witness` before signing, so the signature
+hash sees it, then append it to the stack. `examples/basic/tests/budget_test.rs`
+does that for a program whose cost exceeds its unpadded budget: the spend is
+refused without padding and one byte short of it, and accepted with it.
+
 ## Running the example
 
 `examples/basic` is configured for a local Sequentia chain. One command builds the
@@ -122,9 +145,10 @@ scripts/sequentia-example.sh /path/to/Sequentia/src/sequentiad
 It needs a `sequentiad` (built from the
 [node repository](https://github.com/ConcatenaLabs/Sequentia), or from a Sequentia
 Core release) and `cargo-nextest`. The tests pay to a one-key Simplicity program
-and spend it; issue an asset and move confidential outputs; and pay to a tree
-with a Simplicity leaf and a tapscript exit, spend it by each leaf, and force
-invalid spends of it into blocks to show that consensus refuses them.
+and spend it; issue an asset and move confidential outputs; pay to a tree with a
+Simplicity leaf and a tapscript exit and spend it by each leaf; and spend a
+program that needs padding with and without it. Invalid spends are forced into
+blocks as well as offered to the mempool, to show that consensus refuses them.
 
 ## Things to know before writing a contract
 

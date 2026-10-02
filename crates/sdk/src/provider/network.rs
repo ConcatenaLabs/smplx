@@ -44,6 +44,14 @@ pub static LIQUID_REGTEST_GENESIS: std::sync::LazyLock<elements::BlockHash> = st
     ])
 });
 
+/// Sequentia's Simplicity budget: four weight units per witness byte
+/// (`SIMPLICITY_BUDGET_PER_WITNESS_BYTE` in the node), and an annex of up to 100,000 bytes relays
+/// on a Simplicity leaf (`MAX_STANDARD_SIMPLICITY_ANNEX_SIZE`).
+pub const SEQUENTIA_SIMPLICITY_BUDGET: BudgetRule = BudgetRule {
+    per_witness_byte: 4,
+    max_standard_annex: 100_000,
+};
+
 /// Represents the target network configuration for Simplicity interactions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SimplicityNetwork {
@@ -164,9 +172,12 @@ impl SimplicityNetwork {
     /// largest annex it relays to raise it.
     #[must_use]
     pub fn simplicity_budget(&self) -> BudgetRule {
-        let _ = self;
-
-        BudgetRule::ELEMENTS
+        match self {
+            Self::Liquid | Self::LiquidTestnet | Self::ElementsRegtest { .. } | Self::ElementsCustom { .. } => {
+                BudgetRule::ELEMENTS
+            }
+            Self::SequentiaTestnet | Self::SequentiaRegtest { .. } => SEQUENTIA_SIMPLICITY_BUDGET,
+        }
     }
 
     /// Returns the address parameters associated with the current enum variant.
@@ -254,6 +265,7 @@ mod tests {
         );
         assert_eq!(sequentia.address_params().bech_hrp.as_str(), "tb");
         assert_eq!(sequentia.address_params().blech_hrp.as_str(), "tsqb");
+        assert_eq!(sequentia.simplicity_budget(), SEQUENTIA_SIMPLICITY_BUDGET);
         assert_eq!(liquid.simplicity_budget(), BudgetRule::ELEMENTS);
         assert_eq!(NetworkKind::from(&testnet), NetworkKind::Test);
         assert_eq!(NetworkKind::from(regtest), NetworkKind::Test);
