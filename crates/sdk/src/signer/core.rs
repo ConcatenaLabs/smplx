@@ -7,7 +7,7 @@ use std::sync::Arc;
 use simplicityhl::Value;
 use simplicityhl::WitnessValues;
 use simplicityhl::elements::pset::PartiallySignedTransaction;
-use simplicityhl::elements::secp256k1_zkp::{All, Keypair, Message, Secp256k1, ecdsa, schnorr};
+use simplicityhl::elements::secp256k1_zkp::{self, All, Keypair, Message, Secp256k1, ecdsa, schnorr};
 use simplicityhl::elements::sighash::Prevouts;
 use simplicityhl::elements::taproot::{LeafVersion, TapLeafHash};
 use simplicityhl::elements::{Address, AssetId, LockTime, SchnorrSighashType, Script, Sequence, Transaction, TxOut};
@@ -35,8 +35,8 @@ use elements_miniscript::{
 };
 
 use crate::constants::{FEE_EXCHANGE_RATE_SCALE, MIN_FEE};
-use crate::program::ProgramTrait;
 use crate::program::logger::ProgramLogger;
+use crate::program::{ProgramTrait, SpendBudget};
 #[cfg(feature = "provider")]
 use crate::provider::ProviderTrait;
 use crate::provider::SimplicityNetwork;
@@ -48,6 +48,9 @@ use crate::transaction::{
 use crate::transaction::{PartialInput, TxReceipt, UTXO};
 
 use super::error::SignerError;
+
+/// The length of the DER encoding of every ECDSA signature the signer makes.
+const ECDSA_DER_LEN: usize = 70;
 
 /// A placeholder dummy fee amount used during transaction estimation.
 pub const PLACEHOLDER_FEE: u64 = 1;
@@ -203,14 +206,48 @@ impl SignerTrait for Signer {
         let private_key = self.get_private_key_at(derivation_path);
         let public_key = private_key.public_key(&self.secp);
 
-        let signature = self.secp.sign_ecdsa_low_r(&message, &private_key.inner);
-
-        Ok((public_key, signature))
+        Ok((public_key, self.sign_ecdsa_fixed_length(&message, &private_key.inner)))
     }
 }
 
+/// What a spend will weigh and cost, worked out before its final signatures.
+///
+/// The signer works it out on a draft of the transaction: the same inputs, programs, padding
+/// and outputs, with placeholder amounts in the change and fee outputs. Every part of a spend has
+/// a size fixed before it is signed (a Schnorr signature is 64 bytes, every ECDSA signature the
+/// signer makes is 71 with its sighash byte, a Simplicity program's pruned form and padding do
+/// not depend on its signature), so the final transaction weighs what its draft did and its fee
+/// is right the first time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpendEstimate {
+    /// The weight of the signed transaction.
+    pub weight: usize,
+    /// Its virtual size: the weight divided by four, rounded up.
+    pub vsize: usize,
+    /// The fee, in atoms of the fee asset.
+    pub fee: u64,
+    /// The asset the fee is paid in.
+    pub fee_asset: AssetId,
+    /// Whether the transaction keeps a change output.
+    pub change: bool,
+    /// For each Simplicity input, by index: what its program costs and what its witness earns,
+    /// padding included.
+    pub budgets: Vec<(usize, SpendBudget)>,
+}
+
+/// A transaction whose amounts are settled, and what its draft weighed.
+struct Plan {
+    fee_tx: FinalTransaction,
+    fee: u64,
+    weight: usize,
+    vsize: usize,
+    fee_weight: usize,
+    change: bool,
+    budgets: Vec<(usize, SpendBudget)>,
+}
+
 enum Estimate {
-    Success(Transaction, u64),
+    Success(Box<Plan>),
     Failure(u64),
 }
 
@@ -422,9 +459,10 @@ impl Signer {
                 &fee_asset,
                 policy_amount_delta.cast_unsigned(),
             ) {
-            Ok(Estimate::Success(tx, fee)) => {
+            Ok(Estimate::Success(plan)) => {
+                let signed = self.sign_plan(&plan);
                 ProgramLogger::flush_logs();
-                Ok(Some((tx, fee)))
+                signed.map(Some)
             }
             Ok(Estimate::Failure(required_fee)) => {
                 *curr_fee = required_fee;
@@ -478,9 +516,10 @@ impl Signer {
 
         // policy_amount_delta will be > 0
         match self.estimate_tx(tx.clone(), fee_rate, &fee_asset, policy_amount_delta.cast_unsigned())? {
-            Estimate::Success(tx, fee) => {
+            Estimate::Success(plan) => {
+                let signed = self.sign_plan(&plan);
                 ProgramLogger::flush_logs();
-                Ok((tx, fee))
+                signed
             }
             Estimate::Failure(required_fee) => Err(SignerError::NotEnoughFeeAmount(policy_amount_delta, required_fee)),
         }
@@ -498,8 +537,36 @@ impl Signer {
         ProgramLogger::flush_logs();
 
         Ok(match estimate? {
-            Estimate::Success(_, fee) | Estimate::Failure(fee) => fee,
+            Estimate::Success(plan) => plan.fee,
+            Estimate::Failure(fee) => fee,
         })
+    }
+
+    /// Works out what an assembled transaction will weigh and cost at the given fee rate, before
+    /// it is signed: the weight of the transaction that [`Self::finalize_strict`] returns for it,
+    /// and its fee in the fee asset's own atoms.
+    ///
+    /// # Errors
+    /// Returns a `SignerError` if a program does not run, if the transaction cannot be padded, or
+    /// if its inputs do not cover the fee (`NotEnoughFeeAmount`).
+    pub fn estimate_spend(&self, tx: &FinalTransaction, fee_rate: f32) -> Result<SpendEstimate, SignerError> {
+        let fee_asset = self.fee_asset_quote(tx)?;
+        let available = tx.calculate_fee_delta_in(fee_asset.asset);
+        let estimate = self.estimate_tx(tx.clone(), fee_rate, &fee_asset, available.max(0).cast_unsigned());
+
+        ProgramLogger::flush_logs();
+
+        match estimate? {
+            Estimate::Success(plan) => Ok(SpendEstimate {
+                weight: plan.weight,
+                vsize: plan.vsize,
+                fee: plan.fee,
+                fee_asset: fee_asset.asset,
+                change: plan.change,
+                budgets: plan.budgets,
+            }),
+            Estimate::Failure(required) => Err(SignerError::NotEnoughFeeAmount(available, required)),
+        }
     }
 
     /// Returns a reference to the active configured network provider.
@@ -742,8 +809,9 @@ impl Signer {
 
         fee_tx.add_output(PartialOutput::new(Script::new(), PLACEHOLDER_FEE, fee_asset.asset));
 
-        let final_tx = self.sign_tx(&fee_tx)?;
-        let fee = fee_asset.atoms(fee_tx.calculate_fee(self.fee_weight(&final_tx), fee_rate));
+        // The draft weighs what the final transaction will: only amounts change between them.
+        let (draft, budgets) = self.sign_tx_reporting(&fee_tx)?;
+        let fee = fee_asset.atoms(fee_tx.calculate_fee(self.fee_weight(&draft), fee_rate));
 
         if available_delta > fee && available_delta - fee >= MIN_FEE {
             // We have enough funds to cover the change UTXO
@@ -756,9 +824,9 @@ impl Signer {
                 return Err(SignerError::Unbalanced());
             }
 
-            let final_tx = self.sign_tx(&fee_tx)?;
-
-            return Ok(Estimate::Success(final_tx, fee));
+            return Ok(Estimate::Success(Box::new(
+                self.plan(fee_tx, fee, &draft, true, budgets),
+            )));
         }
 
         // Not enough funds for the change, so estimate without it.
@@ -778,8 +846,8 @@ impl Signer {
 
         fee_tx.remove_output(change_index);
 
-        let final_tx = self.sign_tx(&fee_tx)?;
-        let fee = fee_asset.atoms(fee_tx.calculate_fee(self.fee_weight(&final_tx), fee_rate));
+        let (draft, budgets) = self.sign_tx_reporting(&fee_tx)?;
+        let fee = fee_asset.atoms(fee_tx.calculate_fee(self.fee_weight(&draft), fee_rate));
 
         if available_delta < fee {
             return Ok(Estimate::Failure(fee));
@@ -794,10 +862,49 @@ impl Signer {
             return Err(SignerError::Unbalanced());
         }
 
-        // Finalize the tx with fee and without the change
-        let final_tx = self.sign_tx(&fee_tx)?;
+        // The fee is what is left: at least what the weight asks.
+        Ok(Estimate::Success(Box::new(self.plan(
+            fee_tx,
+            available_delta,
+            &draft,
+            false,
+            budgets,
+        ))))
+    }
 
-        Ok(Estimate::Success(final_tx, fee))
+    fn plan(
+        &self,
+        fee_tx: FinalTransaction,
+        fee: u64,
+        draft: &Transaction,
+        change: bool,
+        budgets: Vec<(usize, SpendBudget)>,
+    ) -> Plan {
+        Plan {
+            fee_tx,
+            fee,
+            weight: draft.weight(),
+            vsize: draft.vsize(),
+            fee_weight: self.fee_weight(draft),
+            change,
+            budgets,
+        }
+    }
+
+    /// Signs a settled transaction. It weighs what its draft did; were it heavier, its fee would be
+    /// short, so that is refused rather than broadcast.
+    fn sign_plan(&self, plan: &Plan) -> Result<(Transaction, u64), SignerError> {
+        let tx = self.sign_tx(&plan.fee_tx)?;
+        let signed = self.fee_weight(&tx);
+
+        if signed > plan.fee_weight {
+            return Err(SignerError::WeightAboveEstimate {
+                estimated: plan.fee_weight,
+                signed,
+            });
+        }
+
+        Ok((tx, plan.fee))
     }
 
     /// The weight the network charges a fee on.
@@ -810,6 +917,14 @@ impl Signer {
     }
 
     fn sign_tx(&self, tx: &FinalTransaction) -> Result<Transaction, SignerError> {
+        Ok(self.sign_tx_reporting(tx)?.0)
+    }
+
+    /// Signs and finalizes a transaction, and reports each Simplicity input's cost and budget.
+    fn sign_tx_reporting(
+        &self,
+        tx: &FinalTransaction,
+    ) -> Result<(Transaction, Vec<(usize, SpendBudget)>), SignerError> {
         let (mut pst, secrets) = tx.extract_pst();
 
         if tx.needs_blinding() {
@@ -829,8 +944,10 @@ impl Signer {
                 input.final_script_witness = annex.clone().map(|annex| vec![annex]);
             }
 
-            if !self.sign_inputs(tx, &mut pst, &mut annexes)? {
-                return Ok(pst.extract_tx()?);
+            let mut budgets = Vec::new();
+
+            if !self.sign_inputs(tx, &mut pst, &mut annexes, &mut budgets)? {
+                return Ok((pst.extract_tx()?, budgets));
             }
         }
 
@@ -844,6 +961,7 @@ impl Signer {
         tx: &FinalTransaction,
         pst: &mut PartiallySignedTransaction,
         annexes: &mut [Option<Vec<u8>>],
+        budgets: &mut Vec<(usize, SpendBudget)>,
     ) -> Result<bool, SignerError> {
         let rule = self.network.simplicity_budget();
         let mut short = false;
@@ -907,6 +1025,7 @@ impl Signer {
                     short = true;
                 }
 
+                budgets.push((index, rule.report(spend.cost, &stack)));
                 pst.inputs_mut()[index].final_script_witness = Some(stack);
             } else if let Some(tapscript) = &input_i.tapscript_input {
                 let witness =
@@ -924,6 +1043,24 @@ impl Signer {
         }
 
         Ok(short)
+    }
+
+    /// An ECDSA signature whose DER encoding is 70 bytes, 71 with its sighash byte: low R, as
+    /// every signer makes, and neither R nor S short. About one signature in 128 is short and is
+    /// made again with fresh nonce data, so a transaction's weight is known before it is signed.
+    fn sign_ecdsa_fixed_length(&self, message: &Message, key: &secp256k1_zkp::SecretKey) -> ecdsa::Signature {
+        let mut signature = self.secp.sign_ecdsa_low_r(message, key);
+        let mut counter = 0u32;
+
+        while signature.serialize_der().len() != ECDSA_DER_LEN {
+            counter += 1;
+
+            let mut extra = [0u8; 32];
+            extra[..4].copy_from_slice(&counter.to_le_bytes());
+            signature = self.secp.sign_ecdsa_with_noncedata(message, key, &extra);
+        }
+
+        signature
     }
 
     /// The witness of a tapscript leaf spend: its items, the leaf script, the control block.
@@ -1276,6 +1413,98 @@ mod tests {
             .find(|o| o.value.explicit() == Some(50_000 - fee))
             .unwrap();
         assert_eq!(change.script_pubkey, signer.get_address().script_pubkey());
+    }
+
+    #[test]
+    fn every_ecdsa_signature_is_71_bytes_with_its_sighash_byte() {
+        let signer = sequentia_signer();
+        let key = signer.get_private_key().inner;
+
+        for n in 0u32..512 {
+            let mut digest = [0u8; 32];
+            digest[..4].copy_from_slice(&n.to_le_bytes());
+            let signature = signer.sign_ecdsa_fixed_length(&Message::from_digest(digest), &key);
+
+            assert_eq!(signature.serialize_der().len(), ECDSA_DER_LEN);
+            assert_eq!(elementssig_to_rawsig(&(signature, EcdsaSighashType::All)).len(), 71);
+            assert!(
+                signer
+                    .secp
+                    .verify_ecdsa(
+                        &Message::from_digest(digest),
+                        &signature,
+                        &signer.get_ecdsa_public_key().inner
+                    )
+                    .is_ok()
+            );
+        }
+    }
+
+    fn gold_spend(signer: &Signer, gold: AssetId, inputs: &[u64], pay: u64) -> FinalTransaction {
+        let mut ft = FinalTransaction::new();
+
+        for (n, value) in inputs.iter().enumerate() {
+            ft.add_input(
+                PartialInput::new(UTXO {
+                    outpoint: OutPoint::new(Txid::from_slice(&[0x01; 32]).unwrap(), u32::try_from(n).unwrap()),
+                    txout: simplicityhl::elements::TxOut::new_fee(*value, gold),
+                    secrets: None,
+                }),
+                RequiredSignature::NativeEcdsa,
+            );
+        }
+        ft.add_output(PartialOutput::new(signer.get_address().script_pubkey(), pay, gold));
+
+        ft
+    }
+
+    #[test]
+    fn the_estimate_is_the_weight_and_fee_of_the_signed_transaction() {
+        let gold = AssetId::from_slice(&[0x07; 32]).unwrap();
+        let signer = sequentia_signer().with_fee_exchange_rate(gold, FEE_EXCHANGE_RATE_SCALE * 3);
+
+        for inputs in [vec![100_000], vec![40_000, 30_000, 30_000]] {
+            for rate in [100.0, 1_000.0, 25_000.0] {
+                let ft = gold_spend(&signer, gold, &inputs, 50_000);
+                let estimate = signer.estimate_spend(&ft, rate).unwrap();
+                let (tx, fee) = signer.finalize_strict(&ft, rate).unwrap();
+
+                assert_eq!(estimate.weight, tx.weight());
+                assert_eq!(estimate.vsize, tx.vsize());
+                assert_eq!(estimate.fee, fee);
+                assert_eq!(estimate.fee_asset, gold);
+                assert!(estimate.change);
+                assert!(estimate.budgets.is_empty());
+                // In the fee asset's own atoms: a third of the reference fee, rounded up.
+                assert_eq!(
+                    fee,
+                    FinalTransaction::new().calculate_fee(tx.weight(), rate).div_ceil(3)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn without_room_for_change_the_whole_remainder_is_the_fee() {
+        let gold = AssetId::from_slice(&[0x07; 32]).unwrap();
+        let signer = sequentia_signer().with_fee_exchange_rate(gold, FEE_EXCHANGE_RATE_SCALE);
+        // With change, the fee is about one atom per vbyte; leave less than that plus the
+        // smallest change.
+        let with_change = signer
+            .estimate_spend(&gold_spend(&signer, gold, &[100_000], 50_000), 1_000.0)
+            .unwrap();
+        let input = 50_000 + with_change.fee + MIN_FEE - 1;
+        let ft = gold_spend(&signer, gold, &[input], 50_000);
+
+        let estimate = signer.estimate_spend(&ft, 1_000.0).unwrap();
+        let (tx, fee) = signer.finalize_strict(&ft, 1_000.0).unwrap();
+
+        assert!(!estimate.change);
+        assert!(estimate.weight < with_change.weight);
+        assert_eq!(estimate.weight, tx.weight());
+        assert_eq!(estimate.fee, input - 50_000);
+        assert_eq!(fee, input - 50_000);
+        assert_eq!(tx.output.len(), 2);
     }
 
     #[test]

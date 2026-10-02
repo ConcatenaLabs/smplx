@@ -128,6 +128,15 @@ pub enum SignerError {
         source: crate::program::BudgetError,
     },
 
+    /// Error indicating a signed transaction weighs more than its draft, so its fee is short.
+    #[error("The signed transaction weighs {signed} WU, more than the {estimated} WU its fee was set for")]
+    WeightAboveEstimate {
+        /// The weight the fee was set for.
+        estimated: usize,
+        /// The weight of the signed transaction.
+        signed: usize,
+    },
+
     /// Error indicating a program's size kept changing with its padding, so no annex settled.
     #[error("The padding of a covenant input did not settle: its program changed with its annex")]
     PaddingUnsettled,
