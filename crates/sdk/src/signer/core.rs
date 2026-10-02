@@ -1474,7 +1474,7 @@ mod tests {
                 assert_eq!(estimate.fee, fee);
                 assert_eq!(estimate.fee_asset, gold);
                 assert!(estimate.change);
-                assert!(estimate.budgets.is_empty());
+                assert_eq!(estimate.budgets, Vec::new());
                 // In the fee asset's own atoms: a third of the reference fee, rounded up.
                 assert_eq!(
                     fee,
