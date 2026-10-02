@@ -4,7 +4,8 @@ use bitcoincore_rpc::{Auth, Client, RpcApi};
 
 use serde_json::Value;
 
-use simplicityhl::elements::{Address, AssetId, BlockHash, Txid};
+use simplicityhl::elements::encode::serialize_hex;
+use simplicityhl::elements::{Address, AssetId, BlockHash, Transaction, Txid};
 use simplicityhl::simplicity::bitcoin;
 
 use super::error::RpcError;
@@ -163,6 +164,75 @@ impl ElementsRpc {
             AssetId::from_str(policy).map_err(|_| RpcError::ElementsRpcUnexpectedReturn("getsidechaininfo".into()))?;
 
         Ok((genesis, policy))
+    }
+
+    /// Asks the node whether its mempool would accept `tx`, without broadcasting it.
+    ///
+    /// Returns `Ok(Ok(()))` when it would, and `Ok(Err(reason))` with the node's reason when not.
+    ///
+    /// # Errors
+    /// Returns an `RpcError` if the call fails or its answer does not parse.
+    pub fn test_mempool_accept(&self, tx: &Transaction) -> Result<Result<(), String>, RpcError> {
+        const METHOD: &str = "testmempoolaccept";
+
+        let answer: Value = self.inner.call(METHOD, &[vec![serialize_hex(tx)].into()])?;
+        let verdict = answer
+            .get(0)
+            .ok_or_else(|| RpcError::ElementsRpcUnexpectedReturn(METHOD.into()))?;
+
+        if verdict["allowed"].as_bool() == Some(true) {
+            return Ok(Ok(()));
+        }
+
+        Ok(Err(verdict["reject-reason"].as_str().unwrap_or("rejected").to_string()))
+    }
+
+    /// Mines one block holding exactly `txs`, in order, whatever the mempool holds. A transaction
+    /// the mempool's policy would refuse goes in all the same, so a block tests consensus alone.
+    ///
+    /// Returns `Ok(Ok(hash))` for a block the node accepted, and `Ok(Err(message))` with the
+    /// node's message for one it refused.
+    ///
+    /// # Errors
+    /// Returns an `RpcError` if the call fails for any other reason.
+    pub fn generate_block_with(&self, txs: &[Transaction]) -> Result<Result<BlockHash, String>, RpcError> {
+        const METHOD: &str = "generateblock";
+
+        let address = self.get_new_address("")?.to_string();
+        let raw: Vec<String> = txs.iter().map(serialize_hex).collect();
+
+        match self.inner.call::<Value>(METHOD, &[address.into(), raw.into()]) {
+            Ok(answer) => {
+                let hash = answer["hash"]
+                    .as_str()
+                    .and_then(|hash| BlockHash::from_str(hash).ok())
+                    .ok_or_else(|| RpcError::ElementsRpcUnexpectedReturn(METHOD.into()))?;
+
+                Ok(Ok(hash))
+            }
+            Err(bitcoincore_rpc::Error::JsonRpc(bitcoincore_rpc::jsonrpc::Error::Rpc(error))) => {
+                Ok(Err(format!("{} (code {})", error.message, error.code)))
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// The weight the node reports for a transaction it knows, and the block it is in, if any.
+    ///
+    /// # Errors
+    /// Returns an `RpcError` if the node does not know the transaction or the answer does not parse.
+    pub fn transaction_weight(&self, txid: &Txid) -> Result<(u64, Option<BlockHash>), RpcError> {
+        const METHOD: &str = "getrawtransaction";
+
+        let answer: Value = self.inner.call(METHOD, &[txid.to_string().into(), true.into()])?;
+        let weight = answer["weight"]
+            .as_u64()
+            .ok_or_else(|| RpcError::ElementsRpcUnexpectedReturn(METHOD.into()))?;
+        let block = answer["blockhash"]
+            .as_str()
+            .and_then(|hash| BlockHash::from_str(hash).ok());
+
+        Ok((weight, block))
     }
 
     /// Retrieves the current block chain tip height.
