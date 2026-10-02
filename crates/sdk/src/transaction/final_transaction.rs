@@ -377,19 +377,29 @@ impl FinalTransaction {
     /// Function will panic if the asset isn't unblinded correctly, and if PST input asset and amount is confidential.
     #[must_use]
     pub fn calculate_fee_delta(&self, network: &SimplicityNetwork) -> i64 {
+        self.calculate_fee_delta_in(network.policy_asset())
+    }
+
+    /// Calculates the fee delta in a given asset: what the inputs carry of it less what the
+    /// outputs spend of it.
+    ///
+    /// # Panics
+    /// Function will panic if the asset isn't unblinded correctly, and if PST input asset and amount is confidential.
+    #[must_use]
+    pub fn calculate_fee_delta_in(&self, fee_asset: AssetId) -> i64 {
         let mut available_amount = 0;
 
         for input in &self.inputs {
             match input.partial_input.secrets {
                 // This is an unblinded confidential input
                 Some(secrets) => {
-                    if secrets.asset == network.policy_asset() {
+                    if secrets.asset == fee_asset {
                         available_amount += secrets.value;
                     }
                 }
                 // This is an explicit input
                 None => {
-                    if input.partial_input.asset.unwrap() == network.policy_asset() {
+                    if input.partial_input.asset.unwrap() == fee_asset {
                         available_amount += input.partial_input.amount.unwrap();
                     }
                 }
@@ -399,10 +409,50 @@ impl FinalTransaction {
         let consumed_amount = self
             .outputs
             .iter()
-            .filter(|output| output.asset == network.policy_asset())
+            .filter(|output| output.asset == fee_asset)
             .fold(0_u64, |acc, output| acc + output.amount);
 
         available_amount.cast_signed() - consumed_amount.cast_signed()
+    }
+
+    /// The assets this transaction moves: those its inputs carry and its outputs pay, leaving
+    /// out an asset the transaction itself issues and a zero-value data output.
+    ///
+    /// # Panics
+    /// Function will panic if an input's asset is confidential and was not unblinded.
+    #[must_use]
+    pub fn moved_assets(&self) -> std::collections::BTreeSet<AssetId> {
+        let mut issued = std::collections::BTreeSet::new();
+        let mut moved = std::collections::BTreeSet::new();
+
+        for input in &self.inputs {
+            match input.partial_input.secrets {
+                Some(secrets) => moved.insert(secrets.asset),
+                None => moved.insert(input.partial_input.asset.unwrap()),
+            };
+
+            // A new issuance creates its asset and its reissuance token; a reissuance creates
+            // only the asset, and spends and re-creates the token like any other asset.
+            if let Some(details) = input.get_issuance_details() {
+                issued.insert(details.asset_id);
+
+                if matches!(input.issuance_input, Some(IssuanceInput::Issuance { .. })) {
+                    issued.insert(details.inflation_asset_id);
+                }
+            }
+        }
+
+        for output in &self.outputs {
+            if output.script_pubkey.is_op_return() && output.amount == 0 {
+                continue;
+            }
+
+            moved.insert(output.asset);
+        }
+
+        moved.retain(|asset| !issued.contains(asset));
+
+        moved
     }
 
     /// Checks if the transaction is balanced, meaning all inputs - all outputs = 0 for every asset.
@@ -1017,5 +1067,66 @@ mod tests {
         ft.add_output(PartialOutput::new_metadata("burn".as_bytes()));
 
         assert!(ft.is_balanced());
+    }
+
+    #[test]
+    fn moved_assets_leave_out_what_the_transaction_issues() {
+        let policy = dummy_asset_id(0xAA);
+
+        let mut issuance = FinalTransaction::new();
+        let details = issuance.add_issuance_input(
+            PartialInput::new(explicit_utxo(0x01, 0, 5000, policy)),
+            IssuanceInput::new_issuance(1_000, 1, [0x42u8; 32]),
+            RequiredSignature::None,
+        );
+        issuance.add_output(PartialOutput::new(Script::new(), 1_000, details.asset_id));
+        issuance.add_output(PartialOutput::new(Script::new(), 1, details.inflation_asset_id));
+
+        assert_eq!(issuance.moved_assets().into_iter().collect::<Vec<_>>(), vec![policy]);
+
+        // A reissuance spends the token and re-creates it: the token moves, the asset is issued.
+        let mut reissuance = FinalTransaction::new();
+        reissuance.add_issuance_input(
+            PartialInput::new(explicit_utxo(0x02, 0, 1, details.inflation_asset_id)),
+            IssuanceInput::new_reissuance(500, details.asset_entropy.0),
+            RequiredSignature::None,
+        );
+        reissuance.add_output(PartialOutput::new(Script::new(), 1, details.inflation_asset_id));
+        reissuance.add_output(PartialOutput::new(Script::new(), 500, details.asset_id));
+
+        assert_eq!(
+            reissuance.moved_assets().into_iter().collect::<Vec<_>>(),
+            vec![details.inflation_asset_id]
+        );
+    }
+
+    /// Sequentia's `CAssetIssuance` carries one byte more than Elements': the
+    /// asset's denomination, 8 unless the issuer chose otherwise. A transaction
+    /// with an issuance must serialise with it and parse back to the same bytes.
+    #[test]
+    fn issuance_serialises_with_the_sequentia_denomination_byte() {
+        use simplicityhl::elements::encode::{deserialize, serialize};
+
+        let policy = dummy_asset_id(0xAA);
+        let mut ft = FinalTransaction::new();
+        ft.add_issuance_input(
+            PartialInput::new(explicit_utxo(0x01, 0, 5000, policy)),
+            IssuanceInput::new_issuance(1_000, 1, [0x42u8; 32]),
+            RequiredSignature::None,
+        );
+        ft.add_output(PartialOutput::new(Script::new(), 5000, policy));
+
+        let tx = ft.extract_pst().0.extract_tx().unwrap();
+        let issuance = &tx.input[0].asset_issuance;
+        let bytes = serialize(issuance);
+
+        // nonce 32, entropy 32, explicit amount 9, explicit inflation keys 9, denomination 1
+        assert_eq!(bytes.len(), 32 + 32 + 9 + 9 + 1);
+        assert_eq!(*bytes.last().unwrap(), 8);
+        assert_eq!(issuance.denomination, 8);
+
+        let raw = serialize(&tx);
+        let parsed: simplicityhl::elements::Transaction = deserialize(&raw).unwrap();
+        assert_eq!(serialize(&parsed), raw);
     }
 }

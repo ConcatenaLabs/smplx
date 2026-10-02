@@ -62,7 +62,10 @@ impl Cli {
                 let config_path = Config::get_default_path()?;
                 let loaded_config = Config::load(config_path)?;
 
-                Ok(Test::run(loaded_config.test, args, flags)?)
+                let mut test_config = loaded_config.test;
+                test_config.regtest = Some(loaded_config.regtest);
+
+                Ok(Test::run(test_config, args, flags)?)
             }
             Command::Regtest => {
                 let config_path = Config::get_default_path()?;

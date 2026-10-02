@@ -4,7 +4,7 @@ use bitcoincore_rpc::{Auth, Client, RpcApi};
 
 use serde_json::Value;
 
-use simplicityhl::elements::{Address, AssetId, Txid};
+use simplicityhl::elements::{Address, AssetId, BlockHash, Txid};
 use simplicityhl::simplicity::bitcoin;
 
 use super::error::RpcError;
@@ -144,6 +144,25 @@ impl ElementsRpc {
         )?;
 
         Ok(())
+    }
+
+    /// Reads the chain the node runs: its genesis block hash and its policy asset.
+    ///
+    /// # Errors
+    /// Returns an `RpcError` if a call fails or returns something that does not parse.
+    pub fn chain_identity(&self) -> Result<(BlockHash, AssetId), RpcError> {
+        let genesis: String = self.inner.call("getblockhash", &[0.into()])?;
+        let info: Value = self.inner.call("getsidechaininfo", &[])?;
+        let policy = info["pegged_asset"]
+            .as_str()
+            .ok_or_else(|| RpcError::ElementsRpcUnexpectedReturn("getsidechaininfo".into()))?;
+
+        let genesis =
+            BlockHash::from_str(&genesis).map_err(|_| RpcError::ElementsRpcUnexpectedReturn("getblockhash".into()))?;
+        let policy =
+            AssetId::from_str(policy).map_err(|_| RpcError::ElementsRpcUnexpectedReturn("getsidechaininfo".into()))?;
+
+        Ok((genesis, policy))
     }
 
     /// Retrieves the current block chain tip height.

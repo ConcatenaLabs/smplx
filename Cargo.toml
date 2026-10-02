@@ -38,3 +38,13 @@ deprecated_in_future = "warn"
 
 [workspace.lints.clippy]
 multiple_crate_versions = "allow"
+
+# Sequentia's transaction encoding: rust-elements with the `sequentia` feature
+# (the issuance denomination byte; the Bitcoin anchor in the block header), as
+# vendored by SWK. `simplicityhl`, `simplicity-lang` and `elements-miniscript`
+# all name crates.io `elements 0.25`, so a patch is the only way to give every
+# one of them the same patched crate. A patch applies only in the workspace that
+# declares it: a project depending on this fork declares the same patch (see
+# SEQUENTIA.md).
+[patch.crates-io]
+elements = { git = "https://github.com/ConcatenaLabs/SWK", rev = "87a9f5e7f98356a2c00712884019079566aacfec" }

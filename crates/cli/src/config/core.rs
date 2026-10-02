@@ -81,7 +81,11 @@ impl Config {
     }
 
     fn validate_network(network: &String) -> Result<(), ConfigError> {
-        if network != "Liquid" && network != "LiquidTestnet" && network != "ElementsRegtest" {
+        if network != "Liquid"
+            && network != "LiquidTestnet"
+            && network != "ElementsRegtest"
+            && network != "SequentiaTestnet"
+        {
             return Err(ConfigError::BadNetworkName(network.clone()));
         }
 

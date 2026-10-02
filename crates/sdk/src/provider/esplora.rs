@@ -150,7 +150,9 @@ impl ProviderTrait for EsploraProvider {
         let timeout_secs = self.timeout.as_secs();
 
         let confirmation_poll = match self.network {
-            SimplicityNetwork::ElementsRegtest { .. } => Duration::from_millis(100),
+            SimplicityNetwork::ElementsRegtest { .. } | SimplicityNetwork::SequentiaRegtest { .. } => {
+                Duration::from_millis(100)
+            }
             _ => Duration::from_secs(10),
         };
 

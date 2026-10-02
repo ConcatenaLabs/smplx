@@ -16,7 +16,7 @@ pub enum ConfigError {
     #[error(transparent)]
     Dependency(#[from] DependencyValidationError),
 
-    #[error("Network name should either be `Liquid`, `LiquidTestnet` or `ElementsRegtest`, got: {0}")]
+    #[error("Network name should be `Liquid`, `LiquidTestnet`, `ElementsRegtest` or `SequentiaTestnet`, got: {0}")]
     BadNetworkName(String),
 
     #[error("Network name should be `ElementsRegtest` when RPC is specified, got: {0}")]

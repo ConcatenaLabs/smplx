@@ -1,14 +1,16 @@
-use smplx_sdk::provider::{ElementsRpc, EsploraProvider, ProviderError, ProviderTrait};
+use smplx_sdk::provider::{ElementsRpc, ProviderError, ProviderTrait};
 
 use crate::error::NetworkUtilsError;
 
 pub struct NetworkUtils {
     rpc: ElementsRpc,
-    esplora: EsploraProvider,
+    esplora: Box<dyn ProviderTrait>,
 }
 
 impl NetworkUtils {
-    pub fn new(rpc: ElementsRpc, esplora: EsploraProvider) -> Self {
+    /// `esplora` is whatever provider the test reads the chain through; mining waits until it
+    /// sees the new tip.
+    pub fn new(rpc: ElementsRpc, esplora: Box<dyn ProviderTrait>) -> Self {
         Self { rpc, esplora }
     }
 

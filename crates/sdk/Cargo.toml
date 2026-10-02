@@ -24,6 +24,9 @@ serde = { workspace = true }
 hex = { workspace = true }
 
 serde_json = { version = "1.0" }
+# Turns on Sequentia's serialisation in the patched `elements` (see the
+# workspace `[patch.crates-io]`).
+elements = { version = "0.25.3", features = ["sequentia"] }
 elements-miniscript = { version = "0.4", features = ["base64", "serde"] }
 bip39 = { version = "2.0.0", features = ["rand"] }
 dyn-clone = { version = "1.0.20" }

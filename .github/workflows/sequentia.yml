@@ -1,0 +1,60 @@
+name: Sequentia
+
+# Runs the basic example's Simplex tests on a local Sequentia chain, with a
+# released Sequentia Core build pinned by version and checksum.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: full
+  SEQUENTIA_CORE_VERSION: "24.7.13"
+  SEQUENTIA_CORE_SHA256: "fcf514294f4121b13b9d8bebfeea1444218b96f5c1d257970a2a5b72d52d4315"
+
+jobs:
+  example:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Use Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Fetch sequentiad
+        shell: bash
+        run: |
+          archive="sequentia-core-${SEQUENTIA_CORE_VERSION}-linux-x86_64.tar.gz"
+          curl -fsSL "https://sequentiatestnet.com/download/${archive}" -o "${archive}"
+          echo "${SEQUENTIA_CORE_SHA256}  ${archive}" | sha256sum -c -
+          tar xzf "${archive}" "sequentia-core-${SEQUENTIA_CORE_VERSION}/bin/sequentiad"
+          echo "SEQUENTIAD=${PWD}/sequentia-core-${SEQUENTIA_CORE_VERSION}/bin/sequentiad" >> "$GITHUB_ENV"
+
+      - name: Run the example on a Sequentia chain
+        run: scripts/sequentia-example.sh "$SEQUENTIAD"

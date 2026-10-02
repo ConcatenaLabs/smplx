@@ -8,9 +8,9 @@ use simplicityhl::Value;
 use simplicityhl::WitnessValues;
 use simplicityhl::elements::pset::PartiallySignedTransaction;
 use simplicityhl::elements::secp256k1_zkp::{All, Keypair, Message, Secp256k1, ecdsa, schnorr};
-use simplicityhl::elements::{Address, LockTime, Script, Sequence, Transaction};
+use simplicityhl::elements::{Address, AssetId, LockTime, Script, Sequence, Transaction};
 #[cfg(feature = "provider")]
-use simplicityhl::elements::{AssetId, OutPoint, Txid};
+use simplicityhl::elements::{OutPoint, Txid};
 use simplicityhl::simplicity::bitcoin::XOnlyPublicKey;
 use simplicityhl::simplicity::hashes::Hash;
 use simplicityhl::str::WitnessName;
@@ -32,7 +32,7 @@ use elements_miniscript::{
     slip77::MasterBlindingKey,
 };
 
-use crate::constants::MIN_FEE;
+use crate::constants::{FEE_EXCHANGE_RATE_SCALE, MIN_FEE};
 use crate::program::ProgramTrait;
 use crate::program::logger::ProgramLogger;
 #[cfg(feature = "provider")]
@@ -89,6 +89,31 @@ pub struct Signer {
     provider: Option<Box<dyn ProviderTrait>>,
     network: SimplicityNetwork,
     secp: Secp256k1<All>,
+    fee_asset: Option<AssetId>,
+    fee_exchange_rates: HashMap<AssetId, u64>,
+}
+
+/// The asset a transaction's fee is paid in, and the rate at which the network values it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeeAsset {
+    /// The asset of the fee output, of the change, and of the coins the signer adds.
+    pub asset: AssetId,
+    /// Atoms of the asset per [`FEE_EXCHANGE_RATE_SCALE`] units of the fee rate's unit.
+    pub exchange_rate: u64,
+}
+
+impl FeeAsset {
+    /// Converts a fee in the fee rate's unit into atoms of the fee asset, rounding up, so the
+    /// network never values the fee below what was asked.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn atoms(&self, reference_fee: u64) -> u64 {
+        let scaled = u128::from(reference_fee) * u128::from(FEE_EXCHANGE_RATE_SCALE);
+
+        scaled
+            .div_ceil(u128::from(self.exchange_rate))
+            .min(u128::from(u64::MAX)) as u64
+    }
 }
 
 impl SignerTrait for Signer {
@@ -181,19 +206,123 @@ impl Signer {
             provider: None,
             network,
             secp,
+            fee_asset: None,
+            fee_exchange_rates: HashMap::new(),
         }
+    }
+
+    /// Pays every fee this signer builds in `asset`.
+    ///
+    /// On a network whose fees are fixed to its policy asset, any other asset is refused when a
+    /// transaction is built.
+    #[must_use]
+    pub fn with_fee_asset(mut self, asset: AssetId) -> Self {
+        self.fee_asset = Some(asset);
+
+        self
+    }
+
+    /// Values fees paid in `asset` at `rate` (atoms per [`FEE_EXCHANGE_RATE_SCALE`] units of the
+    /// fee rate's unit) instead of asking the provider. A signer with no provider needs this for
+    /// any asset a network does not value at par.
+    #[must_use]
+    pub fn with_fee_exchange_rate(mut self, asset: AssetId, rate: u64) -> Self {
+        self.fee_exchange_rates.insert(asset, rate);
+
+        self
+    }
+
+    /// Decides the asset a transaction's fee is paid in.
+    ///
+    /// On a network whose fees are fixed to its policy asset, that asset. Elsewhere the asset set
+    /// with [`Self::with_fee_asset`]; failing that, the one asset the transaction moves; failing
+    /// that, an error. No asset is a fallback.
+    ///
+    /// # Errors
+    /// Returns `FeeAssetNotAccepted` for a fee asset the network cannot take, and `FeeAssetUnset`
+    /// when nothing names the asset.
+    pub fn fee_asset_for(&self, tx: &FinalTransaction) -> Result<AssetId, SignerError> {
+        if self.network.fee_asset_is_fixed() {
+            let policy = self.network.policy_asset();
+
+            return match self.fee_asset {
+                Some(asset) if asset != policy => Err(SignerError::FeeAssetNotAccepted(asset)),
+                _ => Ok(policy),
+            };
+        }
+
+        if let Some(asset) = self.fee_asset {
+            return Ok(asset);
+        }
+
+        let moved = tx.moved_assets();
+
+        match (moved.len(), moved.first()) {
+            (1, Some(asset)) => Ok(*asset),
+            _ => Err(SignerError::FeeAssetUnset(
+                moved.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
+            )),
+        }
+    }
+
+    /// The rate at which the network values fees paid in `asset`.
+    ///
+    /// # Errors
+    /// Returns `FeeAssetNotAccepted` when neither the signer nor its provider knows a positive rate.
+    pub fn fee_exchange_rate(&self, asset: AssetId) -> Result<u64, SignerError> {
+        if let Some(rate) = self.fee_exchange_rates.get(&asset) {
+            return Self::positive_rate(asset, Some(*rate));
+        }
+
+        if self.network.fee_asset_is_fixed() && asset == self.network.policy_asset() {
+            return Ok(FEE_EXCHANGE_RATE_SCALE);
+        }
+
+        #[cfg(feature = "provider")]
+        if let Some(provider) = self.provider.as_deref() {
+            return Self::positive_rate(asset, provider.fetch_fee_exchange_rate(asset)?);
+        }
+
+        Err(SignerError::FeeAssetNotAccepted(asset))
+    }
+
+    fn positive_rate(asset: AssetId, rate: Option<u64>) -> Result<u64, SignerError> {
+        match rate {
+            Some(rate) if rate > 0 => Ok(rate),
+            _ => Err(SignerError::FeeAssetNotAccepted(asset)),
+        }
+    }
+
+    fn fee_asset_quote(&self, tx: &FinalTransaction) -> Result<FeeAsset, SignerError> {
+        let asset = self.fee_asset_for(tx)?;
+
+        Ok(FeeAsset {
+            asset,
+            exchange_rate: self.fee_exchange_rate(asset)?,
+        })
     }
 
     /// Composes, funds, and broadcasts a standard network transaction sending the specified value of the primary policy asset.
     ///
     /// # Errors
     /// Returns a `SignerError` if compiling the inputs fails, there are insufficient funds/fees, or broadcast is rejected.
-    // TODO: add an ability to send arbitrary assets
     #[cfg(feature = "provider")]
     pub fn send(&self, to: Script, amount: u64) -> Result<TxReceipt<'_>, SignerError> {
+        self.send_asset(to, amount, self.network.policy_asset())
+    }
+
+    /// Composes, funds, and broadcasts a transaction sending `amount` of `asset`.
+    ///
+    /// The signer funds only the fee asset, so this works when `asset` is the fee asset: set
+    /// with [`Self::with_fee_asset`], or, where the network has no fixed fee asset, the asset sent.
+    ///
+    /// # Errors
+    /// Returns a `SignerError` if compiling the inputs fails, there are insufficient funds/fees, or broadcast is rejected.
+    #[cfg(feature = "provider")]
+    pub fn send_asset(&self, to: Script, amount: u64, asset: AssetId) -> Result<TxReceipt<'_>, SignerError> {
         let mut ft = FinalTransaction::new();
 
-        ft.add_output(PartialOutput::new(to, amount, self.network.policy_asset()));
+        ft.add_output(PartialOutput::new(to, amount, asset));
 
         let (tx, _fee) = self.finalize(&ft)?;
 
@@ -217,7 +346,8 @@ impl Signer {
     /// Returns a `SignerError` if the wallet contains insufficient funds to satisfy output values and target fee rates.
     #[cfg(feature = "provider")]
     pub fn finalize(&self, tx: &FinalTransaction) -> Result<(Transaction, u64), SignerError> {
-        let mut signer_utxos = self.get_utxos_asset(self.network.policy_asset())?;
+        let fee_asset = self.fee_asset_quote(tx)?;
+        let mut signer_utxos = self.get_utxos_asset(fee_asset.asset)?;
         let mut set = HashSet::new();
 
         for input in tx.inputs() {
@@ -237,8 +367,12 @@ impl Signer {
         let fee_rate = self.get_provider()?.fetch_fee_rate(1)?;
 
         let try_estimate = |fee_tx: &FinalTransaction, policy_amount_delta: i64, curr_fee: &mut u64| match self
-            .estimate_tx(fee_tx.clone(), fee_rate, policy_amount_delta.cast_unsigned())
-        {
+            .estimate_tx(
+                fee_tx.clone(),
+                fee_rate,
+                &fee_asset,
+                policy_amount_delta.cast_unsigned(),
+            ) {
             Ok(Estimate::Success(tx, fee)) => {
                 ProgramLogger::flush_logs();
                 Ok(Some((tx, fee)))
@@ -254,7 +388,7 @@ impl Signer {
         };
 
         for utxo in signer_utxos {
-            let policy_amount_delta = fee_tx.calculate_fee_delta(&self.network);
+            let policy_amount_delta = fee_tx.calculate_fee_delta_in(fee_asset.asset);
 
             if policy_amount_delta >= curr_fee.cast_signed()
                 && let Some(result) = try_estimate(&fee_tx, policy_amount_delta, &mut curr_fee)?
@@ -268,7 +402,7 @@ impl Signer {
         }
 
         // need to try one more time after the loop
-        let policy_amount_delta = fee_tx.calculate_fee_delta(&self.network);
+        let policy_amount_delta = fee_tx.calculate_fee_delta_in(fee_asset.asset);
 
         if policy_amount_delta >= curr_fee.cast_signed()
             && let Some(result) = try_estimate(&fee_tx, policy_amount_delta, &mut curr_fee)?
@@ -286,14 +420,15 @@ impl Signer {
     /// Returns a `SignerError` if the assembled inputs do not meet dust limits or fail to cover the
     /// dynamically estimated required fee.
     pub fn finalize_strict(&self, tx: &FinalTransaction, fee_rate: f32) -> Result<(Transaction, u64), SignerError> {
-        let policy_amount_delta = tx.calculate_fee_delta(&self.network);
+        let fee_asset = self.fee_asset_quote(tx)?;
+        let policy_amount_delta = tx.calculate_fee_delta_in(fee_asset.asset);
 
         if policy_amount_delta < MIN_FEE.cast_signed() {
             return Err(SignerError::DustAmount(policy_amount_delta));
         }
 
         // policy_amount_delta will be > 0
-        match self.estimate_tx(tx.clone(), fee_rate, policy_amount_delta.cast_unsigned())? {
+        match self.estimate_tx(tx.clone(), fee_rate, &fee_asset, policy_amount_delta.cast_unsigned())? {
             Estimate::Success(tx, fee) => {
                 ProgramLogger::flush_logs();
                 Ok((tx, fee))
@@ -307,8 +442,9 @@ impl Signer {
     /// # Errors
     /// Returns a `SignerError` if the transaction cannot be signed.
     pub fn estimate_fee(&self, tx: &FinalTransaction, fee_rate: f32) -> Result<u64, SignerError> {
-        let available_delta = tx.calculate_fee_delta(&self.network).max(0).cast_unsigned();
-        let estimate = self.estimate_tx(tx.clone(), fee_rate, available_delta);
+        let fee_asset = self.fee_asset_quote(tx)?;
+        let available_delta = tx.calculate_fee_delta_in(fee_asset.asset).max(0).cast_unsigned();
+        let estimate = self.estimate_tx(tx.clone(), fee_rate, &fee_asset, available_delta);
 
         ProgramLogger::flush_logs();
 
@@ -521,13 +657,23 @@ impl Signer {
         &self,
         mut fee_tx: FinalTransaction,
         fee_rate: f32,
+        fee_asset: &FeeAsset,
         available_delta: u64,
     ) -> Result<Estimate, SignerError> {
         // Estimate the tx fee with the change. The caller supplies the change target
-        let change = match fee_tx.change() {
-            Some(target) => target.clone(),
-            None => {
-                ChangeOutput::new(self.get_address().script_pubkey()).with_blinding_key(self.get_blinding_public_key())
+        let change = if let Some(target) = fee_tx.change() {
+            target.clone()
+        } else {
+            let change = ChangeOutput::new(self.get_address().script_pubkey());
+
+            // A confidential input with no other blinded output can only balance against a
+            // blinded change, whatever the network's default.
+            let must_blind = fee_tx.has_confidential_input() && !fee_tx.needs_blinding();
+
+            if self.network.confidential_change_by_default() || must_blind {
+                change.with_blinding_key(self.get_blinding_public_key())
+            } else {
+                change
             }
         };
 
@@ -537,7 +683,7 @@ impl Signer {
             return Err(SignerError::ConfidentialInputWithoutBlindedOutput);
         }
 
-        let mut change_output = PartialOutput::new(change.script_pubkey, PLACEHOLDER_FEE, self.network.policy_asset());
+        let mut change_output = PartialOutput::new(change.script_pubkey, PLACEHOLDER_FEE, fee_asset.asset);
 
         if let Some(blinding_key) = change.blinding_key {
             change_output = change_output.with_blinding_key(blinding_key);
@@ -545,14 +691,10 @@ impl Signer {
 
         fee_tx.add_output(change_output);
 
-        fee_tx.add_output(PartialOutput::new(
-            Script::new(),
-            PLACEHOLDER_FEE,
-            self.network.policy_asset(),
-        ));
+        fee_tx.add_output(PartialOutput::new(Script::new(), PLACEHOLDER_FEE, fee_asset.asset));
 
         let final_tx = self.sign_tx(&fee_tx)?;
-        let fee = fee_tx.calculate_fee(final_tx.discount_weight(), fee_rate);
+        let fee = fee_asset.atoms(fee_tx.calculate_fee(self.fee_weight(&final_tx), fee_rate));
 
         if available_delta > fee && available_delta - fee >= MIN_FEE {
             // We have enough funds to cover the change UTXO
@@ -588,7 +730,7 @@ impl Signer {
         fee_tx.remove_output(change_index);
 
         let final_tx = self.sign_tx(&fee_tx)?;
-        let fee = fee_tx.calculate_fee(final_tx.discount_weight(), fee_rate);
+        let fee = fee_asset.atoms(fee_tx.calculate_fee(self.fee_weight(&final_tx), fee_rate));
 
         if available_delta < fee {
             return Ok(Estimate::Failure(fee));
@@ -607,6 +749,15 @@ impl Signer {
         let final_tx = self.sign_tx(&fee_tx)?;
 
         Ok(Estimate::Success(final_tx, fee))
+    }
+
+    /// The weight the network charges a fee on.
+    fn fee_weight(&self, tx: &Transaction) -> usize {
+        if self.network.discounted_ct_fees() {
+            tx.discount_weight()
+        } else {
+            tx.weight()
+        }
     }
 
     fn sign_tx(&self, tx: &FinalTransaction) -> Result<Transaction, SignerError> {
@@ -865,6 +1016,138 @@ mod tests {
             signer.estimate_fee(&ft, 1.0),
             Err(SignerError::ConfidentialInputWithoutBlindedOutput)
         ));
+    }
+
+    #[test]
+    fn fee_atoms_round_up_so_the_fee_is_never_valued_below_the_quote() {
+        let asset = AssetId::from_slice(&[0x07; 32]).unwrap();
+        let par = FeeAsset {
+            asset,
+            exchange_rate: FEE_EXCHANGE_RATE_SCALE,
+        };
+        let dear = FeeAsset {
+            asset,
+            exchange_rate: 3 * FEE_EXCHANGE_RATE_SCALE,
+        };
+        let cheap = FeeAsset {
+            asset,
+            exchange_rate: FEE_EXCHANGE_RATE_SCALE / 4,
+        };
+
+        assert_eq!(par.atoms(1_000), 1_000);
+        // 1,000 / 3 = 333.33: 334 atoms are worth 1,002, 333 only 999
+        assert_eq!(dear.atoms(1_000), 334);
+        assert_eq!(cheap.atoms(1_000), 4_000);
+    }
+
+    #[test]
+    fn a_fixed_fee_network_pays_in_its_policy_asset_and_refuses_another() {
+        let signer = create_signer();
+        let other = AssetId::from_slice(&[0x07; 32]).unwrap();
+        let mut ft = FinalTransaction::new();
+        ft.add_output(PartialOutput::new(Script::new(), 1, other));
+
+        assert_eq!(signer.fee_asset_for(&ft).unwrap(), signer.network.policy_asset());
+        assert_eq!(
+            signer.fee_exchange_rate(signer.network.policy_asset()).unwrap(),
+            FEE_EXCHANGE_RATE_SCALE
+        );
+
+        let signer = signer.with_fee_asset(other);
+        assert!(matches!(
+            signer.fee_asset_for(&ft),
+            Err(SignerError::FeeAssetNotAccepted(asset)) if asset == other
+        ));
+    }
+
+    #[test]
+    fn a_configured_exchange_rate_is_used_and_a_zero_one_refused() {
+        let asset = AssetId::from_slice(&[0x07; 32]).unwrap();
+        let signer = Signer::from_mnemonic(random_mnemonic().as_str(), SimplicityNetwork::Liquid)
+            .with_fee_exchange_rate(asset, 42);
+
+        assert_eq!(signer.fee_exchange_rate(asset).unwrap(), 42);
+
+        let signer = signer.with_fee_exchange_rate(asset, 0);
+        assert!(matches!(
+            signer.fee_exchange_rate(asset),
+            Err(SignerError::FeeAssetNotAccepted(_))
+        ));
+    }
+
+    fn sequentia_signer() -> Signer {
+        Signer::from_mnemonic(random_mnemonic().as_str(), SimplicityNetwork::SequentiaTestnet)
+    }
+
+    #[test]
+    fn on_sequentia_the_fee_is_paid_in_the_one_asset_moved() {
+        let signer = sequentia_signer();
+        let gold = AssetId::from_slice(&[0x07; 32]).unwrap();
+        let mut ft = FinalTransaction::new();
+        ft.add_output(PartialOutput::new(Script::new(), 1, gold));
+
+        assert_eq!(signer.fee_asset_for(&ft).unwrap(), gold);
+    }
+
+    #[test]
+    fn on_sequentia_nothing_falls_back_to_the_policy_asset() {
+        let signer = sequentia_signer();
+        let gold = AssetId::from_slice(&[0x07; 32]).unwrap();
+        let silver = AssetId::from_slice(&[0x08; 32]).unwrap();
+
+        // Two assets moved and none named: refused, policy asset included.
+        let mut ft = FinalTransaction::new();
+        ft.add_output(PartialOutput::new(Script::new(), 1, gold));
+        ft.add_output(PartialOutput::new(Script::new(), 1, silver));
+        assert!(matches!(signer.fee_asset_for(&ft), Err(SignerError::FeeAssetUnset(_))));
+
+        // Nothing moved and none named: refused as well.
+        assert!(matches!(
+            signer.fee_asset_for(&FinalTransaction::new()),
+            Err(SignerError::FeeAssetUnset(_))
+        ));
+
+        // Naming one settles it.
+        let signer = signer.with_fee_asset(silver);
+        assert_eq!(signer.fee_asset_for(&ft).unwrap(), silver);
+
+        // With no provider and no configured rate, even the policy asset has no rate.
+        assert!(matches!(
+            signer.fee_exchange_rate(SimplicityNetwork::SequentiaTestnet.policy_asset()),
+            Err(SignerError::FeeAssetNotAccepted(_))
+        ));
+    }
+
+    #[test]
+    fn on_sequentia_change_is_explicit_and_paid_in_the_fee_asset() {
+        let gold = AssetId::from_slice(&[0x07; 32]).unwrap();
+        let signer = sequentia_signer().with_fee_exchange_rate(gold, FEE_EXCHANGE_RATE_SCALE * 2);
+        let mut ft = FinalTransaction::new();
+
+        ft.add_input(
+            PartialInput::new(UTXO {
+                outpoint: OutPoint::new(Txid::from_slice(&[0x01; 32]).unwrap(), 0),
+                txout: simplicityhl::elements::TxOut::new_fee(100_000, gold),
+                secrets: None,
+            }),
+            RequiredSignature::NativeEcdsa,
+        );
+        ft.add_output(PartialOutput::new(signer.get_address().script_pubkey(), 50_000, gold));
+
+        let (tx, fee) = signer.finalize_strict(&ft, 1_000.0).unwrap();
+
+        // At twice par, a fee of `vsize` reference units costs half as many atoms.
+        assert_eq!(fee, (tx.vsize() as u64).div_ceil(2));
+        for output in &tx.output {
+            assert!(output.asset.is_explicit() && output.value.is_explicit());
+            assert_eq!(output.asset.explicit(), Some(gold));
+        }
+        let change = tx
+            .output
+            .iter()
+            .find(|o| o.value.explicit() == Some(50_000 - fee))
+            .unwrap();
+        assert_eq!(change.script_pubkey, signer.get_address().script_pubkey());
     }
 
     #[test]

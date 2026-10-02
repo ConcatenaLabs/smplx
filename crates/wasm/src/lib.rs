@@ -34,6 +34,7 @@ fn network_from_str(network: &str) -> Result<SimplicityNetwork, JsError> {
         "liquid" => Ok(SimplicityNetwork::Liquid),
         "liquid-testnet" | "liquidtestnet" => Ok(SimplicityNetwork::LiquidTestnet),
         "elements-regtest" | "elementsregtest" | "regtest" => Ok(SimplicityNetwork::default_regtest()),
+        "sequentia-testnet" | "sequentiatestnet" => Ok(SimplicityNetwork::SequentiaTestnet),
         other => Err(JsError::new(&format!("Unknown network: {other}"))),
     }
 }

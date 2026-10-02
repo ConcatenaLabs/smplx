@@ -1,23 +1,40 @@
 use std::fs::OpenOptions;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::error::RegtestError;
 
 pub const DEFAULT_REGTEST_MNEMONIC: &str = "exist carry drive collect lend cereal occur much tiger just involve mean";
 pub const DEFAULT_BITCOINS: u64 = 10_000_000;
 
-#[derive(Debug, Clone, Deserialize)]
+/// The chain a local regtest runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RegtestChain {
+    /// `elementsd` and `electrs` on a Liquid regtest chain.
+    #[default]
+    Elements,
+    /// `sequentiad` on an anchored Sequentia custom chain, read over RPC with no indexer.
+    Sequentia,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RegtestConfig {
+    /// The chain to run.
+    pub chain: RegtestChain,
     pub mnemonic: String,
     pub bitcoins: u64,
     pub rpc_port: Option<u16>,
     pub esplora_port: Option<u16>,
     pub rpc_user: Option<String>,
     pub rpc_password: Option<String>,
+    /// The node binary. Unset, it is looked up on `PATH` by its default name.
+    pub node_bin: Option<PathBuf>,
+    /// The indexer binary. Unset, it is looked up on `PATH` by its default name.
+    pub electrs_bin: Option<PathBuf>,
 }
 
 impl RegtestConfig {
@@ -38,12 +55,15 @@ impl RegtestConfig {
 impl Default for RegtestConfig {
     fn default() -> Self {
         Self {
+            chain: RegtestChain::Elements,
             mnemonic: DEFAULT_REGTEST_MNEMONIC.to_string(),
             bitcoins: DEFAULT_BITCOINS,
             rpc_port: None,
             esplora_port: None,
             rpc_user: None,
             rpc_password: None,
+            node_bin: None,
+            electrs_bin: None,
         }
     }
 }
@@ -64,6 +84,8 @@ mod tests {
                 esplora_port = 3000
                 rpc_user = "user"
                 rpc_password = "password"
+                node_bin = "/opt/elements/bin/elementsd"
+                chain = "sequentia"
             "#,
         )
         .expect("regtest config should be writable");
@@ -76,6 +98,13 @@ mod tests {
         assert_eq!(loaded.esplora_port, Some(3000));
         assert_eq!(loaded.rpc_user.as_deref(), Some("user"));
         assert_eq!(loaded.rpc_password.as_deref(), Some("password"));
+        assert_eq!(
+            loaded.node_bin.as_deref(),
+            Some(Path::new("/opt/elements/bin/elementsd"))
+        );
+        assert!(loaded.electrs_bin.is_none());
+        assert_eq!(loaded.chain, RegtestChain::Sequentia);
+        assert_eq!(defaults.chain, RegtestChain::Elements);
         assert!(defaults.rpc_port.is_none());
         assert!(defaults.esplora_port.is_none());
 

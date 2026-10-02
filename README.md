@@ -7,6 +7,8 @@
 
 # Smplx
 
+> This is Sequentia's copy of Simplex. [SEQUENTIA.md](SEQUENTIA.md) says what differs on Sequentia and how to use it there.
+
 **A blazingly-fast, ux-first Simplicity development framework.**
 
 ## What
@@ -66,6 +68,8 @@ rpc_port = 18443
 esplora_port = 3000
 rpc_user = "user"
 rpc_password = "password"
+node_bin = "<path to elementsd; default: elementsd on PATH>"
+electrs_bin = "<path to electrs; default: electrs on PATH>"
 
 [test]
 mnemonic = "exist carry drive collect lend cereal occur much tiger just involve mean"
@@ -97,10 +101,13 @@ Where:
   - `esplora_port` - The port Electrs will listen on.
   - `rpc_user` - Elements regtest RPC username.
   - `rpc_password` - Elements regtest RPC password.
+  - `node_bin` - The node binary. Without it, `elementsd` is looked up on `PATH`.
+  - `electrs_bin` - The indexer binary. Without it, `electrs` is looked up on `PATH`.
 - `test` (`simplex test` config)
   - `mnemonic` - The signer's mnemonic internal regtest will send initial funds to.
   - `bitcoins` - Initial coins available to the signer.
   - `verbosity` - Simplicity pruning log level.
+  - The regtest `simplex test` starts uses the binaries named in `[regtest]`.
   - `esplora`
     - `url` - Esplora API endpoint url.
     - `network` - Esplora network type (`Liquid`, `LiquidTestnet`, `ElementsRegtest`).
@@ -118,7 +125,7 @@ Simplex CLI provides the following commands:
 - `simplex install <dep>` - Installs SimplicityHL dependencies. Without a `<dep>` provided, installs everything listed in the `[dependencies]` config section. With one or more `<dep>` arguments, appends new entries to the config and then installs everything. The bare name `std` pins the latest `SimplicityHL` [standard library](https://github.com/BlockstreamResearch/simplicityhl-std) release.
 - `simplex build` - Generates simplicity artifacts.
 - `simplex regtest` - Spins up local Electrs + Elements nodes.
-- `simplex test` - Runs Simplex tests.
+- `simplex test` - Runs Simplex tests. It runs them with `smplx-nextest`, which `simplexup` installs; without it, a stock `cargo-nextest` on `PATH` serves, and `SIMPLEX_NEXTEST` names any other.
 - `simplex clean` - Cleans up generated artifacts.
 
 To view the available options, run the help command:
