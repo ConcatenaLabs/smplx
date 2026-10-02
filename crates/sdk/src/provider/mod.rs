@@ -22,6 +22,8 @@ pub use esplora::EsploraProvider;
 #[cfg(feature = "provider")]
 pub use rpc::elements::ElementsRpc;
 #[cfg(feature = "provider")]
+pub use rpc::provider::RpcProvider;
+#[cfg(feature = "provider")]
 pub use simplex::SimplexProvider;
 
 pub use network::*;
