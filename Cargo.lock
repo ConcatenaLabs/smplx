@@ -553,8 +553,7 @@ dependencies = [
 [[package]]
 name = "elements"
 version = "0.25.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83c63a04238f4b7f3564fe9705921452c2900efd00982545e5c634fac9024fe2"
+source = "git+https://github.com/ConcatenaLabs/SWK?rev=87a9f5e7f98356a2c00712884019079566aacfec#87a9f5e7f98356a2c00712884019079566aacfec"
 dependencies = [
  "bech32",
  "bitcoin",
@@ -1431,6 +1430,7 @@ dependencies = [
  "bitcoin_hashes",
  "bitcoincore-rpc",
  "dyn-clone",
+ "elements",
  "elements-miniscript",
  "hex",
  "minreq 3.0.0",

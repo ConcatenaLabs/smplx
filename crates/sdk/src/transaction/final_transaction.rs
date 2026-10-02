@@ -1099,4 +1099,34 @@ mod tests {
             vec![details.inflation_asset_id]
         );
     }
+
+    /// Sequentia's `CAssetIssuance` carries one byte more than Elements': the
+    /// asset's denomination, 8 unless the issuer chose otherwise. A transaction
+    /// with an issuance must serialise with it and parse back to the same bytes.
+    #[test]
+    fn issuance_serialises_with_the_sequentia_denomination_byte() {
+        use simplicityhl::elements::encode::{deserialize, serialize};
+
+        let policy = dummy_asset_id(0xAA);
+        let mut ft = FinalTransaction::new();
+        ft.add_issuance_input(
+            PartialInput::new(explicit_utxo(0x01, 0, 5000, policy)),
+            IssuanceInput::new_issuance(1_000, 1, [0x42u8; 32]),
+            RequiredSignature::None,
+        );
+        ft.add_output(PartialOutput::new(Script::new(), 5000, policy));
+
+        let tx = ft.extract_pst().0.extract_tx().unwrap();
+        let issuance = &tx.input[0].asset_issuance;
+        let bytes = serialize(issuance);
+
+        // nonce 32, entropy 32, explicit amount 9, explicit inflation keys 9, denomination 1
+        assert_eq!(bytes.len(), 32 + 32 + 9 + 9 + 1);
+        assert_eq!(*bytes.last().unwrap(), 8);
+        assert_eq!(issuance.denomination, 8);
+
+        let raw = serialize(&tx);
+        let parsed: simplicityhl::elements::Transaction = deserialize(&raw).unwrap();
+        assert_eq!(serialize(&parsed), raw);
+    }
 }
