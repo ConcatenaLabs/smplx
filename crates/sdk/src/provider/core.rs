@@ -98,11 +98,18 @@ pub trait ProviderTrait {
     /// Returns a `ProviderError` if the REST request fails or the resulting mappings fail to parse cleanly.
     fn fetch_fee_estimates(&self) -> Result<HashMap<String, f64>, ProviderError>;
 
+    /// Whether this provider reads the network's fee exchange rates. An Esplora indexer has no
+    /// such table; a Sequentia node's RPC has, so [`crate::provider::RpcProvider`] is the rate
+    /// source on the testnet as on a local chain.
+    fn has_fee_exchange_rates(&self) -> bool {
+        false
+    }
+
     /// Fetches the exchange rate at which the network values fees paid in `asset`, scaled so
     /// that [`crate::constants::FEE_EXCHANGE_RATE_SCALE`] is par with the fee rate's unit.
     ///
-    /// `None` means the provider has no such table. That is the default, and it is enough on a
-    /// network whose fees are fixed to the policy asset.
+    /// `None` means the node lists no rate for the asset, or the provider has no such table
+    /// ([`Self::has_fee_exchange_rates`]). That is the default.
     ///
     /// # Errors
     /// Returns a `ProviderError` if the backend request fails.

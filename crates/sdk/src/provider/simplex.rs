@@ -88,7 +88,12 @@ impl ProviderTrait for SimplexProvider {
         self.esplora.fetch_fee_estimates()
     }
 
+    fn has_fee_exchange_rates(&self) -> bool {
+        true
+    }
+
     fn fetch_fee_exchange_rate(&self, asset: AssetId) -> Result<Option<u64>, ProviderError> {
-        self.esplora.fetch_fee_exchange_rate(asset)
+        // The indexer has no exchange-rate table; the node beside it has.
+        Ok(self.elements.fee_exchange_rate(asset)?)
     }
 }

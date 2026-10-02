@@ -79,6 +79,14 @@ pub trait ProgramTrait: DynClone {
         network: &SimplicityNetwork,
     ) -> Result<FinalizedSpend, ProgramError>;
 
+    /// Whether the program declares that it checks signatures over a message other than the
+    /// transaction's signature hash or a tagged hash of it. The signer signs a
+    /// [`crate::transaction::SigMessage::Custom`] message with a contract key only for a program
+    /// that does. No program does unless its author says so.
+    fn declares_custom_sig_message(&self) -> bool {
+        false
+    }
+
     /// Finalizes and returns `pruned_witness` as output after executing the program on certain parameters.
     ///
     /// # Errors
@@ -117,6 +125,8 @@ pub struct Program {
     compiled: Arc<OnceLock<CompiledProgram>>,
     // The tree this program is a leaf of, when it is one of several (see `crate::taptree`).
     placement: Option<Arc<taproot::TaprootSpendInfo>>,
+    // Whether the program checks signatures over a message a closure derives.
+    custom_sig_message: bool,
 }
 
 dyn_clone::clone_trait_object!(ProgramTrait);
@@ -128,6 +138,10 @@ impl ProgramTrait for Program {
 
     fn get_witness_types(&self) -> Result<WitnessTypes, ProgramError> {
         self.get_witness_types()
+    }
+
+    fn declares_custom_sig_message(&self) -> bool {
+        self.custom_sig_message
     }
 
     fn get_env(
@@ -157,8 +171,8 @@ impl ProgramTrait for Program {
             });
         }
 
-        // The annex this input carries, which a full signature hash commits to.
-        let tx = pst.extract_tx()?;
+        // The annexes a full signature hash commits to, read as the node reads them.
+        let tx = bip341_annexes(pst.extract_tx()?, input_index);
         let annex = tx.input[input_index]
             .witness
             .script_witness
@@ -240,6 +254,36 @@ impl ProgramTrait for Program {
     }
 }
 
+/// The transaction a signature hash is computed over, with each input's annex placed as BIP 341
+/// and the node read it: the last item of a witness stack of two or more items, when it starts
+/// with `0x50`. A stack of one item has no annex, whatever its first byte, so it is emptied here:
+/// a key-path signature that happens to start with `0x50` is not an annex, and the Simplicity
+/// library, which reads any last item that starts with `0x50` as one, must not see it as one.
+///
+/// The input being signed may hold its annex alone, as a placeholder put there before its own
+/// witness exists: a Simplicity spend always has four items before its annex, so a single item
+/// there can only be that annex, and it is kept, after an empty item. Every other input's annex
+/// counts only in a stack of two or more items; the signer gives an input that is not yet signed
+/// the stack `[placeholder, annex]`.
+#[must_use]
+pub fn bip341_annexes(mut tx: Transaction, input_index: usize) -> Transaction {
+    for (index, input) in tx.input.iter_mut().enumerate() {
+        let stack = &mut input.witness.script_witness;
+
+        if stack.len() < 2 {
+            let own_annex = index == input_index && stack.len() == 1 && stack[0].first() == Some(&ANNEX_TAG);
+
+            if own_annex {
+                stack.insert(0, Vec::new());
+            } else {
+                stack.clear();
+            }
+        }
+    }
+
+    tx
+}
+
 impl Program {
     /// The width of a storage slot.
     pub const STORAGE_SLOT_BYTES: usize = 32;
@@ -255,7 +299,20 @@ impl Program {
             include_debug_symbols: None,
             compiled: Arc::new(OnceLock::new()),
             placement: None,
+            custom_sig_message: false,
         }
+    }
+
+    /// Declares that this program checks signatures over a message other than the transaction's
+    /// signature hash or a tagged hash of it, so the signer may sign a
+    /// [`crate::transaction::SigMessage::Custom`] message for it with a contract key. A program's
+    /// author declares it, beside the program, after checking what that message binds: the chain,
+    /// the coin's asset and amount, the outputs.
+    #[must_use]
+    pub fn with_custom_sig_message(mut self) -> Self {
+        self.custom_sig_message = true;
+
+        self
     }
 
     /// Places this program at a leaf of a larger tree: its address becomes the tree's output and
@@ -644,6 +701,55 @@ mod tests {
         ));
 
         assert!(program.get_env(&pst, 1, &network).is_ok());
+    }
+
+    /// R3 finding 3: the Simplicity library reads any last witness item that starts with `0x50`
+    /// as an annex, and the node only one in a stack of two or more items. A key-path signature
+    /// that starts with `0x50` on another input made the signature hash differ from the node's.
+    #[test]
+    fn the_signature_hash_reads_annexes_as_bip341_does() {
+        let program = dummy_program();
+        let network = dummy_network();
+        let mut pst = make_pst_with_script(program.get_script_pubkey(&network));
+
+        pst.add_input(Input {
+            witness_utxo: Some(TxOut {
+                asset: confidential::Asset::Explicit(dummy_asset_id(0xAA)),
+                value: confidential::Value::Explicit(1000),
+                script_pubkey: Script::new(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        let sighash = |witnesses: [Option<Vec<Vec<u8>>>; 2]| {
+            let mut pst = pst.clone();
+            for (input, witness) in pst.inputs_mut().iter_mut().zip(witnesses) {
+                input.final_script_witness = witness;
+            }
+            program.get_env(&pst, 0, &network).unwrap().c_tx_env().sighash_all()
+        };
+        let annex = vec![ANNEX_TAG, 9, 9];
+        let bare = sighash([None, None]);
+
+        // Another input's one-item stack is no annex, whatever its first byte.
+        assert_eq!(sighash([None, Some(vec![[ANNEX_TAG; 64].to_vec()])]), bare);
+        // In a stack of two items it is one, and the hash commits to it.
+        let placed = sighash([None, Some(vec![Vec::new(), annex.clone()])]);
+        assert_ne!(placed, bare);
+        assert_eq!(sighash([None, Some(vec![vec![1; 64], annex.clone()])]), placed);
+
+        // The input being signed may hold its annex alone, after a placeholder, or after its
+        // witness: the same hash each time.
+        let own = sighash([Some(vec![Vec::new(), annex.clone()]), None]);
+        assert_ne!(own, bare);
+        assert_eq!(sighash([Some(vec![annex.clone()]), None]), own);
+        assert_eq!(
+            sighash([Some(vec![vec![1], vec![2], vec![3], vec![4], annex.clone()]), None]),
+            own
+        );
+        // A one-item stack on the input being signed that is not an annex counts for nothing.
+        assert_eq!(sighash([Some(vec![vec![0x45; 64]]), None]), bare);
     }
 
     #[test]

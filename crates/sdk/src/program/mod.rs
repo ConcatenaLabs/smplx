@@ -13,7 +13,7 @@ pub mod witness;
 
 pub use arguments::ArgumentsTrait;
 pub use budget::{ANNEX_TAG, BudgetError, BudgetRule, SpendBudget};
-pub use core::{FinalizedSpend, Program, ProgramTrait};
+pub use core::{FinalizedSpend, Program, ProgramTrait, bip341_annexes};
 pub use error::ProgramError;
 pub use simplicityhl::tracker::TrackerLogLevel;
 pub use witness::WitnessTrait;

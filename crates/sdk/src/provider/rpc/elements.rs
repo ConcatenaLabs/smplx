@@ -12,6 +12,9 @@ use super::error::RpcError;
 
 use crate::utils::sat2btc;
 
+/// The JSON-RPC error code for a method the node does not have.
+pub(crate) const RPC_METHOD_NOT_FOUND: i32 = -32601;
+
 /// A lightweight wrapper around the standard `bitcoincore_rpc` `Client` providing Elements-specific functionality.
 #[derive(Debug)]
 pub struct ElementsRpc {
@@ -172,6 +175,42 @@ impl ElementsRpc {
             AssetId::from_str(policy).map_err(|_| RpcError::ElementsRpcUnexpectedReturn("getsidechaininfo".into()))?;
 
         Ok((genesis, policy))
+    }
+
+    /// The node's exchange rate for fees paid in `asset`, scaled so that
+    /// [`crate::constants::FEE_EXCHANGE_RATE_SCALE`] is par with its reference unit. `None` when
+    /// the node lists no rate for the asset, or has no table at all (an Elements node).
+    ///
+    /// # Errors
+    /// Returns an `RpcError` if a call fails.
+    pub fn fee_exchange_rate(&self, asset: AssetId) -> Result<Option<u64>, RpcError> {
+        // A node with no fee exchange-rate table (any upstream Elements node) does not know
+        // the call, and then has no rate to give.
+        let rates = match self.inner.call::<Value>("getfeeexchangerates", &[]) {
+            Ok(rates) => rates,
+            Err(bitcoincore_rpc::Error::JsonRpc(bitcoincore_rpc::jsonrpc::Error::Rpc(e)))
+                if e.code == RPC_METHOD_NOT_FOUND =>
+            {
+                return Ok(None);
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        // The table is keyed by asset id, or by the node's label for an asset it has one for.
+        if let Some(rate) = rates.get(asset.to_string()) {
+            return Ok(rate.as_u64());
+        }
+
+        let labels = self.call("dumpassetlabels", &[])?;
+        let label = labels
+            .as_object()
+            .and_then(|map| {
+                map.iter()
+                    .find(|(_, id)| id.as_str() == Some(asset.to_string().as_str()))
+            })
+            .map(|(label, _)| label.clone());
+
+        Ok(label.and_then(|label| rates.get(&label).and_then(Value::as_u64)))
     }
 
     /// Asks the node whether its mempool would accept `tx`, without broadcasting it.
