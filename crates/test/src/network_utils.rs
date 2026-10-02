@@ -14,6 +14,12 @@ impl NetworkUtils {
         Self { rpc, esplora }
     }
 
+    /// The node's RPC client, for what a test does beyond the provider: asking the mempool about
+    /// a transaction, or forcing one into a block.
+    pub fn rpc(&self) -> &ElementsRpc {
+        &self.rpc
+    }
+
     pub fn mine_until_height(&self, target_height: u64) -> Result<(), NetworkUtilsError> {
         let current_height = self.rpc.height().map_err(ProviderError::from)?;
 

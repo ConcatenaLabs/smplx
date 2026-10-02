@@ -69,6 +69,47 @@ A test that moves more than one asset names its fee asset:
 let signer = context.random_signer().with_fee_asset(asset);
 ```
 
+## Contracts with several leaves
+
+A program built with `Program::new` pays to an output with one Simplicity leaf.
+Most contracts need a tree: a program beside the data leaf that holds its
+parameters, a tapscript exit with a delay beside a program, or several programs
+under one output. `taptree::TapTree` describes the shape and
+`taptree::ContractTree` fixes it under an internal key:
+
+```rust
+use simplex::taptree::{ContractTree, TapTree};
+
+let tree = ContractTree::script_only(TapTree::branch(
+    TapTree::branch(TapTree::simplicity("key", program), TapTree::data(&pk)),
+    TapTree::tapscript("exit", exit_script),
+))?;
+
+let address = tree.address(network);
+```
+
+A leaf is a Simplicity program (leaf version `0xbe`), a tapscript (`0xc4`), or a
+hidden node such as `TapTree::data`, the `TapData` hash a program reads back with
+`jet::tappath`. `script_only` uses the internal key with no known discrete
+logarithm, so the output has no key path; `ContractTree::new` takes any key.
+
+A spend names its leaf:
+
+- `tree.program("key")` is the program placed at its leaf. Spend it with a
+  `ProgramInput` as any other program; its address and control block are the
+  tree's.
+- `tree.tapscript_input("exit", witness)` spends a tapscript leaf. `witness`
+  lists what the script consumes, bottom of the stack first;
+  `TapscriptWitness::Signature` is a signature by the input's key, which the
+  signer fills in. Add it with `FinalTransaction::add_tapscript_input`, and set
+  the input's sequence for a relative delay.
+
+A program and its data leaf in one branch give the layout that
+[`sequentia-contracts`](https://github.com/ConcatenaLabs/sequentia-contracts)
+descriptors record: `jet::tappath(0)` is then the data leaf, wherever else the
+branch sits. `examples/basic/tests/tree_test.rs` builds that branch with a
+tapscript exit beside it and spends each leaf.
+
 ## Running the example
 
 `examples/basic` is configured for a local Sequentia chain. One command builds the
@@ -80,8 +121,10 @@ scripts/sequentia-example.sh /path/to/Sequentia/src/sequentiad
 
 It needs a `sequentiad` (built from the
 [node repository](https://github.com/ConcatenaLabs/Sequentia), or from a Sequentia
-Core release) and `cargo-nextest`. The two tests pay to a one-key Simplicity
-program and spend it, then issue an asset and move confidential outputs.
+Core release) and `cargo-nextest`. The tests pay to a one-key Simplicity program
+and spend it; issue an asset and move confidential outputs; and pay to a tree
+with a Simplicity leaf and a tapscript exit, spend it by each leaf, and force
+invalid spends of it into blocks to show that consensus refuses them.
 
 ## Things to know before writing a contract
 

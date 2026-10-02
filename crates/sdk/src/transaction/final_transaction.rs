@@ -12,7 +12,7 @@ use crate::provider::SimplicityNetwork;
 use crate::utils;
 
 use super::change_output::ChangeOutput;
-use super::partial_input::{IssuanceInput, PartialInput, ProgramInput, RequiredSignature};
+use super::partial_input::{IssuanceInput, PartialInput, ProgramInput, RequiredSignature, TapscriptInput};
 use super::partial_output::PartialOutput;
 
 /// Constant is defined for fee calculation on transaction sending.
@@ -38,6 +38,8 @@ pub struct FinalInput {
     pub program_input: Option<ProgramInput>,
     /// Contains optional issuance-related information.
     pub issuance_input: Option<IssuanceInput>,
+    /// Holds the tapscript leaf this input is spent through, when it is.
+    pub tapscript_input: Option<TapscriptInput>,
     /// Required signature for finalizing the transaction.
     pub required_sig: RequiredSignature,
 }
@@ -51,7 +53,16 @@ impl FinalInput {
             required_sig,
             program_input: None,
             issuance_input: None,
+            tapscript_input: None,
         }
+    }
+
+    /// Sets the `tapscript_input` field and returns the modified `FinalInput`.
+    #[must_use]
+    pub fn with_tapscript(mut self, tapscript_input: TapscriptInput) -> Self {
+        self.tapscript_input = Some(tapscript_input);
+
+        self
     }
 
     /// Sets the `program_input` field with the given `ProgramInput` and returns the modified `FinalInput`.
@@ -222,6 +233,14 @@ impl FinalTransaction {
         }
 
         self.push_new_input(FinalInput::new(partial_input, required_sig).with_program(program_input));
+    }
+
+    /// Adds an input spent through a tapscript leaf of a taproot tree.
+    ///
+    /// The signer fills each `TapscriptWitness::Signature` item with a signature by the key at the
+    /// input's derivation path, then appends the leaf script and its control block.
+    pub fn add_tapscript_input(&mut self, partial_input: PartialInput, tapscript_input: TapscriptInput) {
+        self.push_new_input(FinalInput::new(partial_input, RequiredSignature::None).with_tapscript(tapscript_input));
     }
 
     /// Adds an issuance (or reissuance) input to the transaction.

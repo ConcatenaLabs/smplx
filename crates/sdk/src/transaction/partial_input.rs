@@ -5,7 +5,8 @@ use elements_miniscript::bitcoin::bip32::DerivationPath;
 
 use simplicityhl::elements::confidential::{Asset, Value};
 use simplicityhl::elements::pset::Input;
-use simplicityhl::elements::{AssetId, LockTime, OutPoint, Sequence, TxOut, TxOutSecrets, Txid};
+use simplicityhl::elements::taproot::ControlBlock;
+use simplicityhl::elements::{AssetId, LockTime, OutPoint, Script, Sequence, TxOut, TxOutSecrets, Txid};
 use simplicityhl::simplicity::hashes::Hash;
 
 use crate::program::ProgramTrait;
@@ -136,6 +137,29 @@ pub struct ProgramInput {
     pub program: Box<dyn ProgramTrait>,
     /// The witness values required to satisfy the program.
     pub witness: Box<dyn WitnessTrait>,
+}
+
+/// One item of a tapscript leaf's witness.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TapscriptWitness {
+    /// Bytes pushed as they are.
+    Bytes(Vec<u8>),
+    /// A BIP 341 signature (`SIGHASH_DEFAULT`, 64 bytes) by the key at the input's derivation path
+    /// over the transaction, committing to this leaf.
+    Signature,
+}
+
+/// Represents an input spent through a tapscript leaf of a taproot tree.
+///
+/// Build one with [`crate::taptree::ContractTree::tapscript_input`].
+#[derive(Clone, Debug)]
+pub struct TapscriptInput {
+    /// The leaf script.
+    pub script: Script,
+    /// The control block that reveals the leaf.
+    pub control_block: ControlBlock,
+    /// The items the script consumes, the bottom of the stack first.
+    pub witness: Vec<TapscriptWitness>,
 }
 
 /// Represents an input designated for asset issuance or reissuance.

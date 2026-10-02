@@ -89,6 +89,8 @@ pub struct Program {
     storage: Vec<Vec<u8>>,
     include_debug_symbols: Option<bool>,
     compiled: Arc<OnceLock<CompiledProgram>>,
+    // The tree this program is a leaf of, when it is one of several (see `crate::taptree`).
+    placement: Option<Arc<taproot::TaprootSpendInfo>>,
 }
 
 dyn_clone::clone_trait_object!(ProgramTrait);
@@ -214,7 +216,17 @@ impl Program {
             storage: Vec::new(),
             include_debug_symbols: None,
             compiled: Arc::new(OnceLock::new()),
+            placement: None,
         }
+    }
+
+    /// Places this program at a leaf of a larger tree: its address becomes the tree's output and
+    /// its control block reveals its leaf there. `crate::taptree::ContractTree::program` calls it.
+    #[must_use]
+    pub(crate) fn placed_in(mut self, tree: Arc<taproot::TaprootSpendInfo>) -> Self {
+        self.placement = Some(tree);
+
+        self
     }
 
     /// Sets the `pub_key` field of the struct to the provided `XOnlyPublicKey` value and returns the updated builder instance.
@@ -320,7 +332,15 @@ impl Program {
     /// Panics if the `SimplicityHL` compilation fails.
     #[must_use]
     pub fn get_cmr(&self) -> [u8; 32] {
-        self.load().unwrap().commit().cmr().to_byte_array()
+        self.try_cmr().unwrap()
+    }
+
+    /// Compiles the program and returns its Commitment Merkle Root.
+    ///
+    /// # Errors
+    /// Returns a `ProgramError` if compilation fails.
+    pub fn try_cmr(&self) -> Result<[u8; 32], ProgramError> {
+        Ok(self.load()?.commit().cmr().to_byte_array())
     }
 
     /// Returns the 32-byte tapleaf hash of the program's Simplicity script.
@@ -404,6 +424,10 @@ impl Program {
     }
 
     fn taproot_spending_info(&self) -> Result<taproot::TaprootSpendInfo, ProgramError> {
+        if let Some(tree) = &self.placement {
+            return Ok(tree.as_ref().clone());
+        }
+
         let mut builder = taproot::TaprootBuilder::new();
         let (script, version) = self.script_version()?;
         let depths = Self::taproot_leaf_depths(1 + self.get_storage_len());
@@ -427,7 +451,7 @@ impl Program {
         let info = self.taproot_spending_info()?;
         let script_ver = self.script_version()?;
 
-        Ok(info.control_block(&script_ver).expect("control block should exist"))
+        info.control_block(&script_ver).ok_or(ProgramError::NotInTree)
     }
 }
 

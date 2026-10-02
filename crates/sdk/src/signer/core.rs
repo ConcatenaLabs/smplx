@@ -8,7 +8,9 @@ use simplicityhl::Value;
 use simplicityhl::WitnessValues;
 use simplicityhl::elements::pset::PartiallySignedTransaction;
 use simplicityhl::elements::secp256k1_zkp::{All, Keypair, Message, Secp256k1, ecdsa, schnorr};
-use simplicityhl::elements::{Address, AssetId, LockTime, Script, Sequence, Transaction};
+use simplicityhl::elements::sighash::Prevouts;
+use simplicityhl::elements::taproot::{LeafVersion, TapLeafHash};
+use simplicityhl::elements::{Address, AssetId, LockTime, SchnorrSighashType, Script, Sequence, Transaction, TxOut};
 #[cfg(feature = "provider")]
 use simplicityhl::elements::{OutPoint, Txid};
 use simplicityhl::simplicity::bitcoin::XOnlyPublicKey;
@@ -39,7 +41,9 @@ use crate::program::logger::ProgramLogger;
 use crate::provider::ProviderTrait;
 use crate::provider::SimplicityNetwork;
 use crate::signer::wtns_injector::WtnsInjector;
-use crate::transaction::{ChangeOutput, FinalTransaction, PartialOutput, RequiredSignature, SigMessage};
+use crate::transaction::{
+    ChangeOutput, FinalTransaction, PartialOutput, RequiredSignature, SigMessage, TapscriptInput, TapscriptWitness,
+};
 #[cfg(feature = "provider")]
 use crate::transaction::{PartialInput, TxReceipt, UTXO};
 
@@ -62,6 +66,19 @@ pub trait SignerTrait {
         network: &SimplicityNetwork,
         derivation_path: Option<&DerivationPath>,
         message: &SigMessage,
+    ) -> Result<schnorr::Signature, SignerError>;
+
+    /// Generates a BIP 341 signature (`SIGHASH_DEFAULT`) to spend an input through a tapscript leaf.
+    ///
+    /// # Errors
+    /// Returns a `SignerError` if an input lacks its spent output or the sighash cannot be computed.
+    fn sign_tapscript(
+        &self,
+        pst: &PartiallySignedTransaction,
+        input_index: usize,
+        leaf_script: &Script,
+        network: &SimplicityNetwork,
+        derivation_path: Option<&DerivationPath>,
     ) -> Result<schnorr::Signature, SignerError>;
 
     /// Generates an ECDSA signature to spend a standard transaction input.
@@ -129,6 +146,38 @@ impl SignerTrait for Signer {
         let env = program.get_env(pst, input_index, network)?;
         let sighash = env.c_tx_env().sighash_all().to_byte_array();
         let msg = Message::from_digest(message.digest(sighash));
+
+        let private_key = self.get_private_key_at(derivation_path);
+        let keypair = Keypair::from_secret_key(&self.secp, &private_key.inner);
+
+        Ok(self.secp.sign_schnorr(&msg, &keypair))
+    }
+
+    fn sign_tapscript(
+        &self,
+        pst: &PartiallySignedTransaction,
+        input_index: usize,
+        leaf_script: &Script,
+        network: &SimplicityNetwork,
+        derivation_path: Option<&DerivationPath>,
+    ) -> Result<schnorr::Signature, SignerError> {
+        let tx = pst.extract_tx()?;
+        let prevouts = pst
+            .inputs()
+            .iter()
+            .enumerate()
+            .map(|(index, input)| input.witness_utxo.clone().ok_or(SignerError::MissingSpentOutput(index)))
+            .collect::<Result<Vec<TxOut>, _>>()?;
+
+        let leaf_hash = TapLeafHash::from_script(leaf_script, LeafVersion::default());
+        let sighash = SighashCache::new(&tx).taproot_script_spend_signature_hash(
+            input_index,
+            &Prevouts::All(&prevouts),
+            leaf_hash,
+            SchnorrSighashType::Default,
+            network.genesis_block_hash(),
+        )?;
+        let msg = Message::from_digest(sighash.to_byte_array());
 
         let private_key = self.get_private_key_at(derivation_path);
         let keypair = Keypair::from_secret_key(&self.secp, &private_key.inner);
@@ -811,6 +860,11 @@ impl Signer {
                     })?;
 
                 pst.inputs_mut()[index].final_script_witness = Some(pruned_witness);
+            } else if let Some(tapscript) = &input_i.tapscript_input {
+                let witness =
+                    self.tapscript_witness(&pst, index, tapscript, input_i.partial_input.derivation_path.as_ref())?;
+
+                pst.inputs_mut()[index].final_script_witness = Some(witness);
             } else {
                 // We need to sign the UTXO as is
                 // TODO: do we always sign?
@@ -822,6 +876,32 @@ impl Signer {
         }
 
         Ok(pst.extract_tx()?)
+    }
+
+    /// The witness of a tapscript leaf spend: its items, the leaf script, the control block.
+    fn tapscript_witness(
+        &self,
+        pst: &PartiallySignedTransaction,
+        index: usize,
+        tapscript: &TapscriptInput,
+        derivation_path: Option<&DerivationPath>,
+    ) -> Result<Vec<Vec<u8>>, SignerError> {
+        let mut witness = Vec::with_capacity(tapscript.witness.len() + 2);
+
+        for item in &tapscript.witness {
+            witness.push(match item {
+                TapscriptWitness::Bytes(bytes) => bytes.clone(),
+                TapscriptWitness::Signature => self
+                    .sign_tapscript(pst, index, &tapscript.script, &self.network, derivation_path)?
+                    .serialize()
+                    .to_vec(),
+            });
+        }
+
+        witness.push(tapscript.script.to_bytes());
+        witness.push(tapscript.control_block.serialize());
+
+        Ok(witness)
     }
 
     #[allow(clippy::too_many_arguments)]

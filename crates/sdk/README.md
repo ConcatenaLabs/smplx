@@ -10,6 +10,7 @@ It also streamlines building, signing, and broadcasting transactions on Liquid.
 - `provider` - Connect to existing Elements nodes via RPC or Esplora APIs to query UTXOs and broadcast transactions.
 - `transaction` - High-level builder abstractions over `FinalTransaction`, `UTXO`, `PartialInput`, and `PartialOutput`.
 - `program` - Load and interact with Simplicity (`.simf`) smart contracts.
+- `taptree` - Taproot trees with several leaves: Simplicity programs, tapscripts and data leaves, with each leaf's control block and a spend that names its leaf.
 
 The `smplx-sdk` can be used as a standalone SDK, however, check out [Smplx](https://github.com/BlockstreamResearch/smplx) for a complete Simplicity development experience.
 
