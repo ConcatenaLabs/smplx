@@ -148,7 +148,13 @@ impl SimplicityNetwork {
     /// default asset, and `None` where every send must name its asset.
     #[must_use]
     pub fn default_asset(&self) -> Option<elements::AssetId> {
-        Some(self.policy_asset())
+        match self {
+            Self::Liquid | Self::LiquidTestnet | Self::ElementsRegtest { .. } | Self::ElementsCustom { .. } => {
+                Some(self.policy_asset())
+            }
+            // The Sequence token is one asset among equals, so nothing is sent by default.
+            Self::SequentiaTestnet | Self::SequentiaRegtest { .. } => None,
+        }
     }
 
     /// Whether the signer's default change output is confidential on this network.
@@ -273,6 +279,7 @@ mod tests {
         assert_eq!(sequentia.address_params().bech_hrp.as_str(), "tb");
         assert_eq!(sequentia.address_params().blech_hrp.as_str(), "tsqb");
         assert_eq!(sequentia.simplicity_budget(), SEQUENTIA_SIMPLICITY_BUDGET);
+        assert_eq!(sequentia.default_asset(), None);
         assert_eq!(liquid.simplicity_budget(), BudgetRule::ELEMENTS);
         assert_eq!(liquid.default_asset(), Some(liquid.policy_asset()));
         assert_eq!(NetworkKind::from(&testnet), NetworkKind::Test);

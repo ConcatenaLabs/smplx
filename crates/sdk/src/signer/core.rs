@@ -1389,6 +1389,13 @@ mod tests {
     }
 
     #[test]
+    fn on_sequentia_a_send_names_its_asset() {
+        let signer = sequentia_signer();
+
+        assert!(matches!(signer.send(Script::new(), 1), Err(SignerError::AssetUnnamed)));
+    }
+
+    #[test]
     fn on_sequentia_change_is_explicit_and_paid_in_the_fee_asset() {
         let gold = AssetId::from_slice(&[0x07; 32]).unwrap();
         let signer = sequentia_signer().with_fee_exchange_rate(gold, FEE_EXCHANGE_RATE_SCALE * 2);

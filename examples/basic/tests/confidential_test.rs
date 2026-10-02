@@ -65,7 +65,11 @@ fn confidential_test(context: simplex::TestContext) -> anyhow::Result<()> {
     println!("Confirmed");
 
     // spend confidential
-    let tx_receipt = bob.send(alice.get_address().script_pubkey(), 50)?;
+    let tx_receipt = bob.send_asset(
+        alice.get_address().script_pubkey(),
+        50,
+        provider.get_network().policy_asset(),
+    )?;
     println!("Broadcast: {}", tx_receipt);
 
     tx_receipt.wait()?;
