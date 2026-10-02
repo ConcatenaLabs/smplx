@@ -9,6 +9,8 @@ use smplx_sdk::utils::btc2sat;
 use super::RegtestConfig;
 use super::client::RegtestClient;
 use super::error::RegtestError;
+use super::sequentia::SequentiaRegtestClient;
+use smplx_sdk::provider::RpcProvider;
 
 pub struct Regtest {}
 
@@ -36,6 +38,28 @@ impl Regtest {
         let signer = Signer::new(config.mnemonic.as_str(), provider);
 
         Self::prepare_signer(&client, &signer, config.bitcoins)?;
+
+        Ok((client, signer))
+    }
+
+    /// Starts a Sequentia regtest chain and returns it with a signer funded on it.
+    ///
+    /// The signer reads the chain through the node's RPC alone ([`RpcProvider`]), and a block is
+    /// mined after each broadcast.
+    ///
+    /// # Errors
+    /// Returns a `RegtestError` if a node fails to start or a call to it fails.
+    pub fn sequentia_from_config(config: &RegtestConfig) -> Result<(SequentiaRegtestClient, Signer), RegtestError> {
+        let client = SequentiaRegtestClient::new(config)?;
+        let provider = Box::new(RpcProvider::new(
+            client.rpc_url(),
+            client.auth(),
+            client.network(),
+            true,
+        )?);
+        let signer = Signer::new(config.mnemonic.as_str(), provider);
+
+        client.fund(&signer.get_address().to_string(), btc2sat(config.bitcoins))?;
 
         Ok((client, signer))
     }

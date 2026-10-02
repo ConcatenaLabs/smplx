@@ -20,3 +20,4 @@ toml = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+serde_json = { version = "1.0" }

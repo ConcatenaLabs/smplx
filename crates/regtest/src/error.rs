@@ -22,4 +22,10 @@ pub enum RegtestError {
 
     #[error("io error occurred: '{0}'")]
     Io(#[from] io::Error),
+
+    #[error("Failed to start the node: {0}")]
+    NodeStart(String),
+
+    #[error("Node call `{0}` failed: {1}")]
+    NodeCall(String, String),
 }

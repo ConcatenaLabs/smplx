@@ -9,9 +9,22 @@ use super::error::RegtestError;
 pub const DEFAULT_REGTEST_MNEMONIC: &str = "exist carry drive collect lend cereal occur much tiger just involve mean";
 pub const DEFAULT_BITCOINS: u64 = 10_000_000;
 
+/// The chain a local regtest runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RegtestChain {
+    /// `elementsd` and `electrs` on a Liquid regtest chain.
+    #[default]
+    Elements,
+    /// `sequentiad` on an anchored Sequentia custom chain, read over RPC with no indexer.
+    Sequentia,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RegtestConfig {
+    /// The chain to run.
+    pub chain: RegtestChain,
     pub mnemonic: String,
     pub bitcoins: u64,
     pub rpc_port: Option<u16>,
@@ -42,6 +55,7 @@ impl RegtestConfig {
 impl Default for RegtestConfig {
     fn default() -> Self {
         Self {
+            chain: RegtestChain::Elements,
             mnemonic: DEFAULT_REGTEST_MNEMONIC.to_string(),
             bitcoins: DEFAULT_BITCOINS,
             rpc_port: None,
@@ -71,6 +85,7 @@ mod tests {
                 rpc_user = "user"
                 rpc_password = "password"
                 node_bin = "/opt/elements/bin/elementsd"
+                chain = "sequentia"
             "#,
         )
         .expect("regtest config should be writable");
@@ -88,6 +103,8 @@ mod tests {
             Some(Path::new("/opt/elements/bin/elementsd"))
         );
         assert!(loaded.electrs_bin.is_none());
+        assert_eq!(loaded.chain, RegtestChain::Sequentia);
+        assert_eq!(defaults.chain, RegtestChain::Elements);
         assert!(defaults.rpc_port.is_none());
         assert!(defaults.esplora_port.is_none());
 

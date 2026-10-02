@@ -2,12 +2,14 @@ use std::path::PathBuf;
 
 use electrsd::bitcoind::bitcoincore_rpc::Auth;
 
-use smplx_regtest::Regtest;
 use smplx_regtest::client::RegtestClient;
+use smplx_regtest::sequentia::SequentiaRegtestClient;
+use smplx_regtest::{Regtest, RegtestChain};
 
 use smplx_sdk::global::GlobalConfig;
 use smplx_sdk::provider::{
-    ElementsRpc, EsploraProvider, ProviderInfo, ProviderTrait, SimplexProvider, SimplicityNetwork,
+    ElementsRpc, EsploraProvider, ProviderError, ProviderInfo, ProviderTrait, RpcProvider, SimplexProvider,
+    SimplicityNetwork,
 };
 use smplx_sdk::signer::Signer;
 use smplx_sdk::utils::random_mnemonic;
@@ -19,6 +21,9 @@ use crate::network_utils::NetworkUtils;
 #[allow(dead_code)]
 pub struct TestContext {
     _client: Option<RegtestClient>,
+    _sequentia: Option<SequentiaRegtestClient>,
+    // the chain is read over node RPC alone, with no Esplora
+    rpc_only: bool,
     // since providers can't be cloned, we need this variable to create new signers
     _provider_info: ProviderInfo,
     config: TestConfig,
@@ -32,10 +37,13 @@ impl TestContext {
         // error is ignored because we assume that all tests use the same verbosity
         let _ = GlobalConfig::set_global_config(config.verbosity);
 
-        let (signer, provider_info, client) = Self::setup(&config)?;
+        let (signer, provider_info, client, sequentia) = Self::setup(&config)?;
+        let rpc_only = provider_info.esplora_url.is_empty();
 
         Ok(Self {
             _client: client,
+            _sequentia: sequentia,
+            rpc_only,
             _provider_info: provider_info,
             config,
             signer,
@@ -43,7 +51,17 @@ impl TestContext {
     }
 
     pub fn create_signer(&self, mnemonic: &str) -> Signer {
-        let provider: Box<dyn ProviderTrait> = if self._provider_info.elements_url.is_some() {
+        let provider: Box<dyn ProviderTrait> = if self.rpc_only {
+            Box::new(
+                RpcProvider::new(
+                    self._provider_info.elements_url.clone().unwrap(),
+                    self._provider_info.auth.clone().unwrap(),
+                    *self.get_network(),
+                    true,
+                )
+                .expect("the node answered when the context was set up"),
+            )
+        } else if self._provider_info.elements_url.is_some() {
             // local regtest or external regtest
             Box::new(SimplexProvider::new(
                 self._provider_info.esplora_url.clone(),
@@ -90,7 +108,7 @@ impl TestContext {
 
     pub fn get_network_utils(&self) -> NetworkUtils {
         assert!(
-            self._client.is_some(),
+            self._client.is_some() || self._sequentia.is_some(),
             "Network utils only available in Regtest network"
         );
 
@@ -100,13 +118,37 @@ impl TestContext {
         )
         .expect("Failed to create rpc client for network utils");
 
-        let network = self.get_network();
-        let esplora = EsploraProvider::new(self._provider_info.esplora_url.clone(), *network);
+        let network = *self.get_network();
+        let reader: Box<dyn ProviderTrait> = if self.rpc_only {
+            Box::new(
+                RpcProvider::new(
+                    self._provider_info.elements_url.clone().unwrap(),
+                    self._provider_info.auth.clone().unwrap(),
+                    network,
+                    false,
+                )
+                .expect("Failed to create rpc provider for network utils"),
+            )
+        } else {
+            Box::new(EsploraProvider::new(self._provider_info.esplora_url.clone(), network))
+        };
 
-        NetworkUtils::new(regtest_rpc, esplora)
+        NetworkUtils::new(regtest_rpc, reader)
     }
 
-    fn setup(config: &TestConfig) -> Result<(Signer, ProviderInfo, Option<RegtestClient>), TestError> {
+    #[allow(clippy::type_complexity)]
+    fn setup(
+        config: &TestConfig,
+    ) -> Result<
+        (
+            Signer,
+            ProviderInfo,
+            Option<RegtestClient>,
+            Option<SequentiaRegtestClient>,
+        ),
+        TestError,
+    > {
+        let mut sequentia: Option<SequentiaRegtestClient> = None;
         let client: Option<RegtestClient>;
         let provider_info: ProviderInfo;
         let signer: Signer;
@@ -137,6 +179,7 @@ impl TestContext {
                         "Liquid" => SimplicityNetwork::Liquid,
                         "LiquidTestnet" => SimplicityNetwork::LiquidTestnet,
                         "ElementsRegtest" => SimplicityNetwork::default_regtest(),
+                        "SequentiaTestnet" => SimplicityNetwork::SequentiaTestnet,
                         other => return Err(TestError::BadNetworkName(other.to_string())),
                     };
                     let provider = Box::new(EsploraProvider::new(esplora.url.clone(), network));
@@ -150,21 +193,69 @@ impl TestContext {
                     client = None;
                 }
             },
-            None => {
-                // simplex inner network
-                let (regtest_client, regtest_signer) = Regtest::from_config(&config.to_regtest_config())?;
+            None => match (config.rpc.clone(), config.to_regtest_config()) {
+                (Some(rpc), regtest) => {
+                    // an external node read over RPC alone; the chain is read from the node
+                    let auth = Auth::UserPass(rpc.username, rpc.password);
+                    let network = Self::network_from_node(&rpc.url, &auth, regtest.chain)?;
+                    let provider = Box::new(
+                        RpcProvider::new(rpc.url.clone(), auth.clone(), network, true).map_err(ProviderError::from)?,
+                    );
 
-                provider_info = ProviderInfo {
-                    esplora_url: regtest_client.esplora_url(),
-                    elements_url: Some(regtest_client.rpc_url()),
-                    auth: Some(regtest_client.auth()),
-                };
-                signer = regtest_signer;
-                client = Some(regtest_client);
-            }
+                    provider_info = ProviderInfo {
+                        esplora_url: String::new(),
+                        elements_url: Some(rpc.url),
+                        auth: Some(auth),
+                    };
+                    signer = Signer::new(config.mnemonic.as_str(), provider);
+                    client = None;
+                }
+                (None, regtest) if regtest.chain == RegtestChain::Sequentia => {
+                    // simplex inner Sequentia chain, read over RPC alone
+                    let (sequentia_client, regtest_signer) = Regtest::sequentia_from_config(&regtest)?;
+
+                    provider_info = ProviderInfo {
+                        esplora_url: String::new(),
+                        elements_url: Some(sequentia_client.rpc_url()),
+                        auth: Some(sequentia_client.auth()),
+                    };
+                    signer = regtest_signer;
+                    client = None;
+                    sequentia = Some(sequentia_client);
+                }
+                (None, regtest) => {
+                    // simplex inner network
+                    let (regtest_client, regtest_signer) = Regtest::from_config(&regtest)?;
+
+                    provider_info = ProviderInfo {
+                        esplora_url: regtest_client.esplora_url(),
+                        elements_url: Some(regtest_client.rpc_url()),
+                        auth: Some(regtest_client.auth()),
+                    };
+                    signer = regtest_signer;
+                    client = Some(regtest_client);
+                }
+            },
         }
 
-        Ok((signer, provider_info, client))
+        Ok((signer, provider_info, client, sequentia))
+    }
+
+    /// Reads a node's chain: its genesis hash and policy asset.
+    fn network_from_node(url: &str, auth: &Auth, chain: RegtestChain) -> Result<SimplicityNetwork, TestError> {
+        let rpc = ElementsRpc::new(url.to_string(), auth.clone()).map_err(ProviderError::from)?;
+        let (genesis_hash, policy_asset) = rpc.chain_identity().map_err(ProviderError::from)?;
+
+        Ok(match chain {
+            RegtestChain::Sequentia => SimplicityNetwork::SequentiaRegtest {
+                policy_asset,
+                genesis_hash,
+            },
+            RegtestChain::Elements => SimplicityNetwork::ElementsCustom {
+                policy_asset,
+                genesis_hash,
+            },
+        })
     }
 }
 
@@ -172,6 +263,10 @@ impl Drop for TestContext {
     fn drop(&mut self) {
         if let Some(x) = &mut self._client {
             let _ = x.kill();
+        }
+
+        if let Some(x) = &mut self._sequentia {
+            x.kill();
         }
     }
 }
