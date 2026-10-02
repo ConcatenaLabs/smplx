@@ -101,6 +101,30 @@ impl SimplicityNetwork {
         self == &Self::Liquid
     }
 
+    /// Whether consensus on this network accepts fees only in its policy asset.
+    ///
+    /// Where it does, the signer pays every fee in the policy asset. Where it does not, the
+    /// signer pays in the asset it is told to, or in the one asset a transaction moves, and
+    /// never falls back to the policy asset.
+    #[must_use]
+    pub fn fee_asset_is_fixed(&self) -> bool {
+        match self {
+            Self::Liquid | Self::LiquidTestnet | Self::ElementsRegtest { .. } | Self::ElementsCustom { .. } => true,
+        }
+    }
+
+    /// Whether the signer's default change output is confidential on this network.
+    ///
+    /// Where it is not, change is explicit unless the transaction spends a confidential input
+    /// and has no other blinded output, in which case the change is blinded because the
+    /// transaction cannot balance otherwise.
+    #[must_use]
+    pub fn confidential_change_by_default(&self) -> bool {
+        match self {
+            Self::Liquid | Self::LiquidTestnet | Self::ElementsRegtest { .. } | Self::ElementsCustom { .. } => true,
+        }
+    }
+
     /// Returns the address parameters associated with the current enum variant.
     #[must_use]
     pub const fn address_params(&self) -> &'static elements::AddressParams {

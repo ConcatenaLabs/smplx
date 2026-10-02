@@ -5,5 +5,5 @@ pub mod error;
 /// Utilities for injecting witness data bindings into Simplicity environments.
 mod wtns_injector;
 
-pub use core::{Signer, SignerTrait};
+pub use core::{FeeAsset, Signer, SignerTrait};
 pub use error::SignerError;

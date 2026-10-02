@@ -3,7 +3,7 @@ use std::collections::HashMap;
 #[cfg(feature = "provider")]
 use bitcoincore_rpc::Auth;
 
-use simplicityhl::elements::{Address, Script, Transaction, Txid};
+use simplicityhl::elements::{Address, AssetId, Script, Transaction, Txid};
 
 use crate::provider::SimplicityNetwork;
 use crate::transaction::{TxReceipt, UTXO};
@@ -97,6 +97,18 @@ pub trait ProviderTrait {
     /// # Errors
     /// Returns a `ProviderError` if the REST request fails or the resulting mappings fail to parse cleanly.
     fn fetch_fee_estimates(&self) -> Result<HashMap<String, f64>, ProviderError>;
+
+    /// Fetches the exchange rate at which the network values fees paid in `asset`, scaled so
+    /// that [`crate::constants::FEE_EXCHANGE_RATE_SCALE`] is par with the fee rate's unit.
+    ///
+    /// `None` means the provider has no such table. That is the default, and it is enough on a
+    /// network whose fees are fixed to the policy asset.
+    ///
+    /// # Errors
+    /// Returns a `ProviderError` if the backend request fails.
+    fn fetch_fee_exchange_rate(&self, _asset: AssetId) -> Result<Option<u64>, ProviderError> {
+        Ok(None)
+    }
 
     /// Attempts to extract the specific fee rate (in sats/kvb) necessary for the transaction to be confirmed within `target_blocks`.
     ///

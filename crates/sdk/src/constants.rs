@@ -6,6 +6,11 @@ pub const DUMMY_SIGNATURE: [u8; 64] = [1; 64];
 /// Minimal acceptable fee for nodes to send a transaction
 pub const MIN_FEE: u64 = 10;
 
+/// The scale of a fee exchange rate: a fee asset whose rate equals this is valued at par
+/// with the unit fee rates are quoted in. A fee of `f` reference units is paid with
+/// `ceil(f * FEE_EXCHANGE_RATE_SCALE / rate)` atoms of the fee asset.
+pub const FEE_EXCHANGE_RATE_SCALE: u64 = 100_000_000;
+
 /// Policy `AssetId` (hex, BE) for Liquid mainnet.
 pub const LIQUID_POLICY_ASSET_STR: &str = "6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d";
 

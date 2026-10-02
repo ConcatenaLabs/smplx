@@ -79,6 +79,18 @@ pub enum SignerError {
     #[error("A confidential input needs at least one blinded output, but the change target is explicit")]
     ConfidentialInputWithoutBlindedOutput,
 
+    /// Error indicating that nothing names the asset a transaction's fee is paid in.
+    ///
+    /// Raised on a network with no fixed fee asset when the signer has no fee asset set and the
+    /// transaction moves no asset, or more than one. The message lists the assets it moves.
+    #[error("Nothing names the fee asset: set one with `with_fee_asset` (the transaction moves: [{0}])")]
+    FeeAssetUnset(String),
+
+    /// Error indicating that the network does not accept fees in this asset, or that no
+    /// exchange rate for it is known.
+    #[error("Fees cannot be paid in asset {0}: the network does not accept it, or no exchange rate for it is known")]
+    FeeAssetNotAccepted(simplicityhl::elements::AssetId),
+
     /// Error indicating an invalid upstream `secp256k1` secret key.
     #[error("Invalid secret key")]
     InvalidSecretKey(#[from] simplicityhl::elements::secp256k1_zkp::UpstreamError),
