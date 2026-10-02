@@ -168,14 +168,17 @@ fn budget_test(context: simplex::TestContext) -> anyhow::Result<()> {
     );
     accepted(&utils, &format!("annex of {} bytes", annex.len()), &padded)?;
 
-    // The signer pads by itself, with the same annex.
+    // The signer pads by itself, with the same annex, and its estimate made before signing
+    // counts the padding: it is the weight the node reports.
     let mut ft = FinalTransaction::new();
     ft.add_program_input(
         PartialInput::new(coins[1].clone()),
         ProgramInput::new(Box::new(tree.program("costly")?), Box::new(witness(signer, [0; 64]))),
         RequiredSignature::Witness("SIG".to_string()),
     );
-    let (by_signer, fee) = signer.finalize(&ft)?;
+    let fee_rate = provider.fetch_fee_rate(1)?;
+    let estimate = signer.estimate_spend(&ft, fee_rate)?;
+    let (by_signer, fee) = signer.finalize_strict(&ft, fee_rate)?;
     let carried = by_signer.input[0]
         .witness
         .script_witness
@@ -188,8 +191,24 @@ fn budget_test(context: simplex::TestContext) -> anyhow::Result<()> {
         carried.len(),
         annex.len()
     );
-    println!("SIGNER padded with {} bytes; fee {fee}", carried.len());
-    accepted(&utils, "padded by the signer", &by_signer)?;
+    println!(
+        "SIGNER padded with {} bytes; estimate: weight {}, fee {}, budgets {:?}",
+        carried.len(),
+        estimate.weight,
+        estimate.fee,
+        estimate.budgets
+    );
+    anyhow::ensure!(estimate.fee == fee, "estimated fee {} but signed {fee}", estimate.fee);
+    anyhow::ensure!(
+        estimate.budgets.first().map(|(_, budget)| budget.annex_bytes) == Some(annex.len()),
+        "the estimate does not report the padding"
+    );
+    let weight = accepted(&utils, "padded by the signer", &by_signer)?;
+    anyhow::ensure!(
+        weight == estimate.weight as u64,
+        "estimated {} WU, the node reports {weight}",
+        estimate.weight
+    );
 
     // The largest annex that relays, and one byte more: the limit is the mempool's, not consensus'.
     let pst = by_hand(&tree, signer, coins[2].clone(), LARGE_FEE)?;

@@ -35,6 +35,14 @@ impl ElementsRpc {
         Ok(Self { inner, auth, url })
     }
 
+    /// Calls any RPC method with positional parameters and returns its answer as JSON.
+    ///
+    /// # Errors
+    /// Returns an `RpcError` if the call fails.
+    pub fn call(&self, method: &str, params: &[Value]) -> Result<Value, RpcError> {
+        Ok(self.inner.call(method, params)?)
+    }
+
     /// Requests a new wallet address from the node, mapped to the provided label.
     ///
     /// # Errors

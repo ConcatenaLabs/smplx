@@ -133,6 +133,23 @@ hash sees it, then append it to the stack. `examples/basic/tests/budget_test.rs`
 does that for a program whose cost exceeds its unpadded budget: the spend is
 refused without padding and one byte short of it, and accepted with it.
 
+## Weight and fee before signing
+
+`Signer::estimate_spend(&tx, fee_rate)` says what a spend will weigh and what
+its fee will be, in atoms of the asset the fee is paid in, before the signer
+makes the signatures that count. It works on a draft: the same inputs,
+programs, padding and outputs, with placeholder amounts in the change and fee
+outputs. Nothing whose size changes is left to signing: a Schnorr signature is
+64 bytes, every ECDSA signature the signer makes is 71 with its sighash byte,
+and a program's pruned form and padding do not depend on its signature. So
+`finalize_strict(&tx, fee_rate)` returns a transaction of exactly the estimated
+weight, with exactly the estimated fee, and the signer refuses one that would
+weigh more than its fee was set for. The estimate also lists each Simplicity
+input's cost bound, the budget its witness earns and its padding.
+
+The fee rate is in the node's reference unit per 1,000 vbytes; the fee is that
+amount converted into the fee asset at the node's exchange rate, rounded up.
+
 ## Running the example
 
 `examples/basic` is configured for a local Sequentia chain. One command builds the
@@ -146,8 +163,9 @@ It needs a `sequentiad` (built from the
 [node repository](https://github.com/ConcatenaLabs/Sequentia), or from a Sequentia
 Core release) and `cargo-nextest`. The tests pay to a one-key Simplicity program
 and spend it; issue an asset and move confidential outputs; pay to a tree with a
-Simplicity leaf and a tapscript exit and spend it by each leaf; and spend a
-program that needs padding with and without it. Invalid spends are forced into
+Simplicity leaf and a tapscript exit and spend it by each leaf, paying fees in
+an asset they issue and checking each spend's estimate against the weight the
+node reports; and spend a program that needs padding with and without it. Invalid spends are forced into
 blocks as well as offered to the mempool, to show that consensus refuses them.
 
 ## Things to know before writing a contract

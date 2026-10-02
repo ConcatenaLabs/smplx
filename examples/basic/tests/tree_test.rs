@@ -7,13 +7,20 @@
 //!
 //! The program and its data leaf keep the fixed-root layout, so `jet::tappath(0)` is still the
 //! data leaf; the exit sits one level up.
+//!
+//! The coins are an asset the test issues, valued by the node at three reference units an atom,
+//! and each spend pays its fee in that asset. The signer's estimate of each spend, made before it
+//! signs, must equal the weight the node reports once the spend is confirmed, and its fee must be
+//! the reference fee converted into the asset's own atoms.
 
 use simplex::simplicityhl::elements::opcodes::all::{OP_CHECKSIG, OP_CSV, OP_DROP};
 use simplex::simplicityhl::elements::script::Builder;
 use simplex::simplicityhl::elements::{Script, Sequence, Transaction};
 
-use simplex::signer::Signer;
+use simplex::signer::{Signer, SpendEstimate};
+use simplex::simplicityhl::elements::AssetId;
 use simplex::taptree::{ContractTree, TapTree};
+use simplex::transaction::partial_input::IssuanceInput;
 use simplex::transaction::{
     FinalTransaction, PartialInput, PartialOutput, ProgramInput, RequiredSignature, TapscriptWitness, UTXO,
 };
@@ -86,8 +93,8 @@ fn refused(utils: &simplex::NetworkUtils, what: &str, tx: &Transaction) -> anyho
     Ok(())
 }
 
-/// Forces `tx` into a block and requires the node to take it.
-fn accepted(utils: &simplex::NetworkUtils, what: &str, tx: &Transaction) -> anyhow::Result<()> {
+/// Forces `tx` into a block and requires the node to take it. Returns the weight the node reports.
+fn accepted(utils: &simplex::NetworkUtils, what: &str, tx: &Transaction) -> anyhow::Result<u64> {
     let rpc = utils.rpc();
 
     rpc.test_mempool_accept(tx)?
@@ -103,7 +110,75 @@ fn accepted(utils: &simplex::NetworkUtils, what: &str, tx: &Transaction) -> anyh
         tx.vsize()
     );
 
-    Ok(())
+    Ok(weight)
+}
+
+/// The node's value of one atom of the issued asset, in reference units, and the exchange rate
+/// that says so (atoms of the reference unit per 10^8).
+const GOLD_VALUE: u64 = 3;
+const GOLD_RATE: u64 = GOLD_VALUE * 100_000_000;
+
+/// Issues an asset to the signer and has the node accept fees in it at `GOLD_RATE`.
+fn issue_gold(signer: &Signer, utils: &simplex::NetworkUtils) -> anyhow::Result<AssetId> {
+    let funding = signer.get_utxos_asset(signer.get_provider()?.get_network().policy_asset())?;
+    let mut ft = FinalTransaction::new();
+
+    let issued = ft.add_issuance_input(
+        PartialInput::new(funding[0].clone()),
+        IssuanceInput::new_issuance(10_000_000, 0, [7; 32]),
+        RequiredSignature::NativeEcdsa,
+    );
+    ft.add_output(PartialOutput::new(
+        signer.get_address().script_pubkey(),
+        10_000_000,
+        issued.asset_id,
+    ));
+    signer.broadcast(&ft)?.wait()?;
+
+    let rpc = utils.rpc();
+    let mut rates = rpc.call("getfeeexchangerates", &[])?;
+    rates[issued.asset_id.to_string()] = GOLD_RATE.into();
+    rpc.call("setfeeexchangerates", &[rates, false.into()])?;
+
+    Ok(issued.asset_id)
+}
+
+/// Estimates a spend, then signs it at the same fee rate, and checks that the fee is the
+/// reference fee in the asset's own atoms.
+fn estimated_and_signed(
+    signer: &Signer,
+    ft: &FinalTransaction,
+    fee_rate: f32,
+    gold: AssetId,
+) -> anyhow::Result<(SpendEstimate, Transaction)> {
+    let estimate = signer.estimate_spend(ft, fee_rate)?;
+    let (tx, fee) = signer.finalize_strict(ft, fee_rate)?;
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss
+    )]
+    let reference_fee = (estimate.vsize as f32 * fee_rate / 1000.0).ceil() as u64;
+
+    println!(
+        "ESTIMATE weight {}, vsize {}, fee {} atoms of the fee asset ({reference_fee} reference units)",
+        estimate.weight, estimate.vsize, estimate.fee
+    );
+    anyhow::ensure!(estimate.fee_asset == gold, "the fee is not paid in the asset moved");
+    anyhow::ensure!(estimate.fee == fee, "estimated fee {} but signed {fee}", estimate.fee);
+    anyhow::ensure!(
+        fee == reference_fee.div_ceil(GOLD_VALUE),
+        "fee {fee} is not {reference_fee} reference units in atoms worth {GOLD_VALUE}"
+    );
+    anyhow::ensure!(
+        estimate.weight == tx.weight(),
+        "estimated {} WU, signed {}",
+        estimate.weight,
+        tx.weight()
+    );
+
+    Ok((estimate, tx))
 }
 
 #[simplex::test]
@@ -117,10 +192,14 @@ fn tree_test(context: simplex::TestContext) -> anyhow::Result<()> {
     let script = tree.script_pubkey();
     println!("tree output {}", tree.address(&network));
 
+    let gold = issue_gold(signer, &utils)?;
+    let fee_rate = provider.fetch_fee_rate(1)?;
+    println!("fee rate {fee_rate} reference units per 1,000 vbytes");
+
     // Three coins in one payment, so they confirm in one block.
     let mut payment = FinalTransaction::new();
     for _ in 0..3 {
-        payment.add_output(PartialOutput::new(script.clone(), AMOUNT, network.policy_asset()));
+        payment.add_output(PartialOutput::new(script.clone(), AMOUNT, gold));
     }
     signer.broadcast(&payment)?.wait()?;
     let confirmed_at = utils.rpc().height()?;
@@ -134,7 +213,8 @@ fn tree_test(context: simplex::TestContext) -> anyhow::Result<()> {
     );
 
     // The Simplicity leaf.
-    let (by_key, _) = signer.finalize(&key_spend(&tree, signer, coins[0].clone())?)?;
+    let (key_estimate, by_key) =
+        estimated_and_signed(signer, &key_spend(&tree, signer, coins[0].clone())?, fee_rate, gold)?;
     let (other_coin, _) = signer.finalize(&key_spend(&tree, signer, coins[1].clone())?)?;
 
     // Another transaction's witness: a signature over a different coin's spend.
@@ -148,7 +228,11 @@ fn tree_test(context: simplex::TestContext) -> anyhow::Result<()> {
     *stack.last_mut().unwrap() = tree.control_block("exit")?.serialize();
     refused(&utils, "key leaf under the exit's control block", &wrong_leaf)?;
 
-    accepted(&utils, "key leaf", &by_key)?;
+    let key_weight = accepted(&utils, "key leaf", &by_key)?;
+    anyhow::ensure!(
+        key_weight == key_estimate.weight as u64,
+        "key leaf: the node reports {key_weight} WU"
+    );
 
     // The tapscript exit, one block before its delay ends, then with a broken signature, then
     // once the delay has passed.
@@ -157,13 +241,17 @@ fn tree_test(context: simplex::TestContext) -> anyhow::Result<()> {
     refused(&utils, "exit one block before its delay ends", &early)?;
 
     utils.mine_until_height(confirmed_at + u64::from(EXIT_BLOCKS) - 1)?;
-    let (by_exit, _) = signer.finalize(&exit_spend(&tree, coins[2].clone())?)?;
+    let (exit_estimate, by_exit) = estimated_and_signed(signer, &exit_spend(&tree, coins[2].clone())?, fee_rate, gold)?;
 
     let mut forged = by_exit.clone();
     forged.input[0].witness.script_witness[0][0] ^= 0x01;
     refused(&utils, "exit with a broken signature", &forged)?;
 
-    accepted(&utils, "exit leaf", &by_exit)?;
+    let exit_weight = accepted(&utils, "exit leaf", &by_exit)?;
+    anyhow::ensure!(
+        exit_weight == exit_estimate.weight as u64,
+        "exit leaf: the node reports {exit_weight} WU"
+    );
 
     Ok(())
 }
