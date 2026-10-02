@@ -2,12 +2,12 @@
 
 The `smplx-sdk` crate is a standalone set of modules of a larger [Smplx](https://github.com/BlockstreamResearch/smplx) framework that can be used separately to interact with Simplicity smart contracts. 
 
-It also streamlines building, signing, and broadcasting transactions on Liquid.
+It also streamlines building, signing, and broadcasting transactions. This copy works with Sequentia networks only, and refuses Liquid and Elements networks: see [SEQUENTIA.md](https://github.com/ConcatenaLabs/smplx/blob/master/SEQUENTIA.md).
 
 ## Functionality
 
 - `signer` - Securely parse BIP39 mnemonics, manage keys, sign transactions, and work with confidential addresses.
-- `provider` - Connect to existing Elements nodes via RPC or Esplora APIs to query UTXOs and broadcast transactions.
+- `provider` - Connect to existing Sequentia nodes via RPC or Esplora APIs to query UTXOs, read fee exchange rates and broadcast transactions.
 - `transaction` - High-level builder abstractions over `FinalTransaction`, `UTXO`, `PartialInput`, and `PartialOutput`.
 - `program` - Load and interact with Simplicity (`.simf`) smart contracts.
 - `taptree` - Taproot trees with several leaves: Simplicity programs, tapscripts and data leaves, with each leaf's control block and a spend that names its leaf.

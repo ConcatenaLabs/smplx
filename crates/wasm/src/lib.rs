@@ -19,7 +19,7 @@ use simplicityhl::elements::{AssetId, ContractHash, LockTime, OutPoint, Script, 
 use simplicityhl::{Arguments, TemplateProgram, UnstableFeatures, WitnessValues};
 
 use smplx_sdk::program::{ArgumentsTrait, Program, WitnessTrait};
-use smplx_sdk::provider::SimplicityNetwork;
+use smplx_sdk::provider::{SimplicityNetwork, UnsupportedNetwork};
 use smplx_sdk::signer::Signer;
 use smplx_sdk::transaction::partial_input::IssuanceInput;
 use smplx_sdk::transaction::{
@@ -28,15 +28,18 @@ use smplx_sdk::transaction::{
 
 use wasm_bindgen::prelude::*;
 
-/// Resolves a network name to the Simplex SDK's network enum.
+/// Resolves a network name to the Simplex SDK's network enum. This build speaks Sequentia's
+/// transaction encoding only, so the Liquid and Elements names are refused.
 fn network_from_str(network: &str) -> Result<SimplicityNetwork, JsError> {
-    match network {
-        "liquid" => Ok(SimplicityNetwork::Liquid),
-        "liquid-testnet" | "liquidtestnet" => Ok(SimplicityNetwork::LiquidTestnet),
-        "elements-regtest" | "elementsregtest" | "regtest" => Ok(SimplicityNetwork::default_regtest()),
-        "sequentia-testnet" | "sequentiatestnet" => Ok(SimplicityNetwork::SequentiaTestnet),
-        other => Err(JsError::new(&format!("Unknown network: {other}"))),
-    }
+    let refused = match network {
+        "sequentia-testnet" | "sequentiatestnet" => return Ok(SimplicityNetwork::SequentiaTestnet),
+        "liquid" => SimplicityNetwork::Liquid,
+        "liquid-testnet" | "liquidtestnet" => SimplicityNetwork::LiquidTestnet,
+        "elements-regtest" | "elementsregtest" | "regtest" => SimplicityNetwork::default_regtest(),
+        other => return Err(JsError::new(&format!("Unknown network: {other}"))),
+    };
+
+    Err(JsError::new(&UnsupportedNetwork(refused).to_string()))
 }
 
 /// Asset issuance details.
@@ -903,7 +906,7 @@ mod tests {
             Covenant::new(TRIVIAL, None, Some(format!("[\"{leaf}\"]")), None).expect("a covenant with state");
         let moved = Covenant::new(TRIVIAL, None, Some(format!("[\"{other}\"]")), None).expect("a covenant with state");
 
-        let network = "liquidtestnet";
+        let network = "sequentiatestnet";
 
         assert_ne!(plain.address(network).unwrap(), stateful.address(network).unwrap());
         assert_ne!(stateful.address(network).unwrap(), moved.address(network).unwrap());

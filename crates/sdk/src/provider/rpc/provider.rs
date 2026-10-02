@@ -38,8 +38,11 @@ impl RpcProvider {
     /// Connects to the node at `url`.
     ///
     /// # Errors
-    /// Returns an `RpcError` if the client cannot be created or the node does not answer.
+    /// Returns an `RpcError` if `network` is not a Sequentia network, if the client cannot be
+    /// created or the node does not answer.
     pub fn new(url: String, auth: Auth, network: SimplicityNetwork, mine_on_broadcast: bool) -> Result<Self, RpcError> {
+        network.require_sequentia()?;
+
         Ok(Self {
             rpc: ElementsRpc::new(url, auth)?,
             network,

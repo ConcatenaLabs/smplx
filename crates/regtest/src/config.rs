@@ -13,10 +13,11 @@ pub const DEFAULT_BITCOINS: u64 = 10_000_000;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RegtestChain {
-    /// `elementsd` and `electrs` on a Liquid regtest chain.
-    #[default]
+    /// `elementsd` and `electrs` on a Liquid regtest chain: upstream's local chain, which this
+    /// build refuses, since it speaks Sequentia's transaction encoding only.
     Elements,
     /// `sequentiad` on an anchored Sequentia custom chain, read over RPC with no indexer.
+    #[default]
     Sequentia,
 }
 
@@ -55,7 +56,7 @@ impl RegtestConfig {
 impl Default for RegtestConfig {
     fn default() -> Self {
         Self {
-            chain: RegtestChain::Elements,
+            chain: RegtestChain::Sequentia,
             mnemonic: DEFAULT_REGTEST_MNEMONIC.to_string(),
             bitcoins: DEFAULT_BITCOINS,
             rpc_port: None,
@@ -84,7 +85,7 @@ mod tests {
                 esplora_port = 3000
                 rpc_user = "user"
                 rpc_password = "password"
-                node_bin = "/opt/elements/bin/elementsd"
+                node_bin = "/opt/sequentia/bin/sequentiad"
                 chain = "sequentia"
             "#,
         )
@@ -100,11 +101,11 @@ mod tests {
         assert_eq!(loaded.rpc_password.as_deref(), Some("password"));
         assert_eq!(
             loaded.node_bin.as_deref(),
-            Some(Path::new("/opt/elements/bin/elementsd"))
+            Some(Path::new("/opt/sequentia/bin/sequentiad"))
         );
         assert!(loaded.electrs_bin.is_none());
         assert_eq!(loaded.chain, RegtestChain::Sequentia);
-        assert_eq!(defaults.chain, RegtestChain::Elements);
+        assert_eq!(defaults.chain, RegtestChain::Sequentia);
         assert!(defaults.rpc_port.is_none());
         assert!(defaults.esplora_port.is_none());
 

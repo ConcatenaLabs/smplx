@@ -10,6 +10,7 @@ use simplicityhl::simplicity::bitcoin;
 
 use super::error::RpcError;
 
+use crate::provider::SimplicityNetwork;
 use crate::utils::sat2btc;
 
 /// The JSON-RPC error code for a method the node does not have.
@@ -177,6 +178,24 @@ impl ElementsRpc {
         Ok((genesis, policy))
     }
 
+    /// Whether the node is a Sequentia node, asked of the node itself: a Sequentia node answers
+    /// `getfeeexchangerates`, the table its open fee market values fees by, and an Elements node
+    /// does not have the call.
+    ///
+    /// # Errors
+    /// Returns an `RpcError` if the call fails for any reason but the method being unknown.
+    pub fn is_sequentia(&self) -> Result<bool, RpcError> {
+        match self.inner.call::<Value>("getfeeexchangerates", &[]) {
+            Ok(_) => Ok(true),
+            Err(bitcoincore_rpc::Error::JsonRpc(bitcoincore_rpc::jsonrpc::Error::Rpc(e)))
+                if e.code == RPC_METHOD_NOT_FOUND =>
+            {
+                Ok(false)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// The node's exchange rate for fees paid in `asset`, scaled so that
     /// [`crate::constants::FEE_EXCHANGE_RATE_SCALE`] is par with its reference unit. `None` when
     /// the node lists no rate for the asset, or has no table at all (an Elements node).
@@ -211,6 +230,32 @@ impl ElementsRpc {
             .map(|(label, _)| label.clone());
 
         Ok(label.and_then(|label| rates.get(&label).and_then(Value::as_u64)))
+    }
+
+    /// The Sequentia network the node runs, read from the node: `SequentiaTestnet` for the
+    /// testnet's genesis, else a `SequentiaRegtest` with the node's genesis and policy asset.
+    ///
+    /// No configuration key decides this, so a node configured as one thing and running another
+    /// is never taken for what its configuration says.
+    ///
+    /// # Errors
+    /// Returns `RpcError::NotSequentia` for a node that is not a Sequentia node, and another
+    /// `RpcError` if a call fails.
+    pub fn sequentia_network(&self) -> Result<SimplicityNetwork, RpcError> {
+        if !self.is_sequentia()? {
+            return Err(RpcError::NotSequentia(self.url.clone()));
+        }
+
+        let (genesis_hash, policy_asset) = self.chain_identity()?;
+
+        if genesis_hash == SimplicityNetwork::SequentiaTestnet.genesis_block_hash() {
+            return Ok(SimplicityNetwork::SequentiaTestnet);
+        }
+
+        Ok(SimplicityNetwork::SequentiaRegtest {
+            policy_asset,
+            genesis_hash,
+        })
     }
 
     /// Asks the node whether its mempool would accept `tx`, without broadcasting it.

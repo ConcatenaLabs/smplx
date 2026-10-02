@@ -324,7 +324,8 @@ impl Signer {
     /// Creates a new `Signer` instance seeded from the provided mnemonic and paired with the specified provider.
     ///
     /// # Panics
-    /// Panics if the mnemonic fails to parse, or if deriving the master private key fails.
+    /// Panics if the provider's network is not a Sequentia network, if the mnemonic fails to
+    /// parse, or if deriving the master private key fails.
     #[cfg(feature = "provider")]
     #[must_use]
     pub fn new(mnemonic: &str, provider: Box<dyn ProviderTrait>) -> Self {
@@ -341,9 +342,14 @@ impl Signer {
     /// This is the constructor a host with its own networking and its own key custody should use.
     ///
     /// # Panics
-    /// Panics if the mnemonic fails to parse, or if deriving the master private key fails.
+    /// Panics if `network` is not a Sequentia network ([`SimplicityNetwork::require_sequentia`]),
+    /// if the mnemonic fails to parse, or if deriving the master private key fails.
     #[must_use]
     pub fn from_mnemonic(mnemonic: &str, network: SimplicityNetwork) -> Self {
+        if let Err(refused) = network.require_sequentia() {
+            panic!("{refused}");
+        }
+
         let secp = Secp256k1::new();
         let mnemonic: Mnemonic = mnemonic
             .parse()
@@ -1559,23 +1565,21 @@ mod tests {
     }
 
     #[test]
-    fn a_fixed_fee_network_pays_in_its_policy_asset_and_refuses_another() {
-        let signer = Signer::from_mnemonic(random_mnemonic().as_str(), SimplicityNetwork::Liquid);
-        let other = AssetId::from_slice(&[0x07; 32]).unwrap();
-        let mut ft = FinalTransaction::new();
-        ft.add_output(PartialOutput::new(Script::new(), 1, other));
+    #[should_panic(expected = "This build of Simplex speaks Sequentia's transaction encoding only")]
+    fn a_liquid_signer_is_refused() {
+        let _ = Signer::from_mnemonic(random_mnemonic().as_str(), SimplicityNetwork::Liquid);
+    }
 
-        assert_eq!(signer.fee_asset_for(&ft).unwrap(), signer.network.policy_asset());
-        assert_eq!(
-            signer.fee_exchange_rate(signer.network.policy_asset()).unwrap(),
-            FEE_EXCHANGE_RATE_SCALE
-        );
+    #[test]
+    #[should_panic(expected = "is not a Sequentia network")]
+    fn an_elements_signer_is_refused() {
+        let _ = Signer::from_mnemonic(random_mnemonic().as_str(), SimplicityNetwork::default_regtest());
+    }
 
-        let signer = signer.with_fee_asset(other);
-        assert!(matches!(
-            signer.fee_asset_for(&ft),
-            Err(SignerError::FeeAssetNotAccepted(asset)) if asset == other
-        ));
+    #[test]
+    #[should_panic(expected = "is not a Sequentia network")]
+    fn an_elements_provider_is_refused() {
+        let _ = EsploraProvider::new("http://127.0.0.1:1/api".into(), SimplicityNetwork::LiquidTestnet);
     }
 
     #[test]

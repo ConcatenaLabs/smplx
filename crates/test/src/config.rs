@@ -104,7 +104,7 @@ mod tests {
             verbosity: Verbosity::Trace,
             esplora: Some(EsploraConfig {
                 url: "http://localhost:3000".into(),
-                network: "ElementsRegtest".into(),
+                network: "SequentiaTestnet".into(),
             }),
             rpc: Some(RpcConfig {
                 url: "http://localhost:18443".into(),
@@ -112,7 +112,7 @@ mod tests {
                 password: "password".into(),
             }),
             regtest: Some(RegtestConfig {
-                node_bin: Some("/opt/elements/bin/elementsd".into()),
+                node_bin: Some("/opt/sequentia/bin/sequentiad".into()),
                 rpc_port: Some(18443),
                 ..RegtestConfig::default()
             }),
@@ -127,7 +127,7 @@ mod tests {
         assert_eq!(loaded.verbosity, Verbosity::Trace);
         let esplora = loaded.esplora.as_ref().unwrap();
         assert_eq!(esplora.url, "http://localhost:3000");
-        assert_eq!(esplora.network, "ElementsRegtest");
+        assert_eq!(esplora.network, "SequentiaTestnet");
         let rpc = loaded.rpc.as_ref().unwrap();
         assert_eq!(rpc.url, "http://localhost:18443");
         assert_eq!(rpc.username, "user");
@@ -137,7 +137,7 @@ mod tests {
         assert!(regtest.rpc_port.is_none());
         assert_eq!(
             regtest.node_bin.as_deref(),
-            Some(std::path::Path::new("/opt/elements/bin/elementsd"))
+            Some(std::path::Path::new("/opt/sequentia/bin/sequentiad"))
         );
         assert!(regtest.esplora_port.is_none());
         assert!(regtest.rpc_user.is_none());

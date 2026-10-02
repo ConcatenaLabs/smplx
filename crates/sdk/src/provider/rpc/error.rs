@@ -9,6 +9,17 @@ pub enum RpcError {
     #[error("Elements RPC returned an unexpected value for call {0}")]
     ElementsRpcUnexpectedReturn(String),
 
+    /// Error indicating the node is not a Sequentia node: it does not answer `getfeeexchangerates`.
+    #[error(
+        "The node at {0} does not answer `getfeeexchangerates`, so it is not a Sequentia node. \
+         This build of Simplex works with Sequentia only"
+    )]
+    NotSequentia(String),
+
+    /// Error indicating a network this build refuses.
+    #[error(transparent)]
+    UnsupportedNetwork(#[from] crate::provider::UnsupportedNetwork),
+
     /// Error thrown when an invalid hex string fails to parse back into an exact byte array sequence.
     #[error("Failed to decode hex value to array, {0}")]
     BitcoinHashesHex(#[from] bitcoin_hashes::hex::HexToArrayError),

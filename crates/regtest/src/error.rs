@@ -11,6 +11,9 @@ pub enum RegtestError {
     #[error(transparent)]
     Signer(#[from] SignerError),
 
+    #[error("{0}. Set `chain = \"sequentia\"` in `[regtest]`")]
+    UnsupportedNetwork(#[from] smplx_sdk::provider::UnsupportedNetwork),
+
     #[error("Failed to terminate elements")]
     ElementsTermination(),
 

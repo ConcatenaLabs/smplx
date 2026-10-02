@@ -15,17 +15,15 @@ use smplx_sdk::provider::RpcProvider;
 pub struct Regtest {}
 
 impl Regtest {
-    /// Initializes a Regtest environment and returns a configured client and funded signer.
-    ///
-    /// This method establishes a connection to the backend, sets up the provider,
-    /// and prepares the `Signer` by generating initial blocks and sweeping funds based on the configuration.
+    /// Initializes an Elements regtest environment (`elementsd` and `electrs`), upstream's
+    /// local chain. This build refuses it, since it speaks Sequentia's transaction encoding
+    /// only: run [`Self::sequentia_from_config`] instead (`chain = "sequentia"`).
     ///
     /// # Errors
-    /// Returns a `RegtestError` if node initialization, block generation, or RPC calls fail.
-    ///
-    /// # Panics
-    /// Panics if the background indexer (`electrs`) fails to index the unspent outputs within the timeout window (10 seconds).
+    /// Returns `RegtestError::UnsupportedNetwork` always.
     pub fn from_config(config: &RegtestConfig) -> Result<(RegtestClient, Signer), RegtestError> {
+        SimplicityNetwork::default_regtest().require_sequentia()?;
+
         let client = RegtestClient::new(config);
 
         let provider = Box::new(SimplexProvider::new(

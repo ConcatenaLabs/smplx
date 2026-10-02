@@ -2,14 +2,14 @@ use std::path::PathBuf;
 
 use electrsd::bitcoind::bitcoincore_rpc::Auth;
 
+use smplx_regtest::Regtest;
 use smplx_regtest::client::RegtestClient;
 use smplx_regtest::sequentia::SequentiaRegtestClient;
-use smplx_regtest::{Regtest, RegtestChain};
 
 use smplx_sdk::global::GlobalConfig;
 use smplx_sdk::provider::{
     ElementsRpc, EsploraProvider, ProviderError, ProviderInfo, ProviderTrait, RpcProvider, SimplexProvider,
-    SimplicityNetwork,
+    SimplicityNetwork, UnsupportedNetwork,
 };
 use smplx_sdk::signer::Signer;
 use smplx_sdk::utils::random_mnemonic;
@@ -156,13 +156,14 @@ impl TestContext {
         match config.esplora.clone() {
             Some(esplora) => match config.rpc.clone() {
                 Some(rpc) => {
-                    // custom regtest case
+                    // an external node with an Esplora beside it; the chain is read from the node
                     let auth = Auth::UserPass(rpc.username, rpc.password);
+                    let network = Self::network_from_node(&rpc.url, &auth)?;
                     let provider = Box::new(SimplexProvider::new(
                         esplora.url.clone(),
                         rpc.url.clone(),
                         auth.clone(),
-                        SimplicityNetwork::default_regtest(),
+                        network,
                     ));
 
                     provider_info = ProviderInfo {
@@ -176,10 +177,12 @@ impl TestContext {
                 None => {
                     // external esplora network
                     let network = match esplora.network.as_str() {
-                        "Liquid" => SimplicityNetwork::Liquid,
-                        "LiquidTestnet" => SimplicityNetwork::LiquidTestnet,
-                        "ElementsRegtest" => SimplicityNetwork::default_regtest(),
                         "SequentiaTestnet" => SimplicityNetwork::SequentiaTestnet,
+                        "Liquid" => return Err(UnsupportedNetwork(SimplicityNetwork::Liquid).into()),
+                        "LiquidTestnet" => return Err(UnsupportedNetwork(SimplicityNetwork::LiquidTestnet).into()),
+                        "ElementsRegtest" => {
+                            return Err(UnsupportedNetwork(SimplicityNetwork::default_regtest()).into());
+                        }
                         other => return Err(TestError::BadNetworkName(other.to_string())),
                     };
                     let provider = Box::new(EsploraProvider::new(esplora.url.clone(), network));
@@ -194,10 +197,10 @@ impl TestContext {
                 }
             },
             None => match (config.rpc.clone(), config.to_regtest_config()) {
-                (Some(rpc), regtest) => {
+                (Some(rpc), _) => {
                     // an external node read over RPC alone; the chain is read from the node
                     let auth = Auth::UserPass(rpc.username, rpc.password);
-                    let network = Self::network_from_node(&rpc.url, &auth, regtest.chain)?;
+                    let network = Self::network_from_node(&rpc.url, &auth)?;
                     let provider = Box::new(
                         RpcProvider::new(rpc.url.clone(), auth.clone(), network, true).map_err(ProviderError::from)?,
                     );
@@ -210,7 +213,7 @@ impl TestContext {
                     signer = Signer::new(config.mnemonic.as_str(), provider);
                     client = None;
                 }
-                (None, regtest) if regtest.chain == RegtestChain::Sequentia => {
+                (None, regtest) if regtest.chain == smplx_regtest::RegtestChain::Sequentia => {
                     // simplex inner Sequentia chain, read over RPC alone
                     let (sequentia_client, regtest_signer) = Regtest::sequentia_from_config(&regtest)?;
 
@@ -224,7 +227,7 @@ impl TestContext {
                     sequentia = Some(sequentia_client);
                 }
                 (None, regtest) => {
-                    // simplex inner network
+                    // upstream's Elements regtest, which this build refuses
                     let (regtest_client, regtest_signer) = Regtest::from_config(&regtest)?;
 
                     provider_info = ProviderInfo {
@@ -241,21 +244,13 @@ impl TestContext {
         Ok((signer, provider_info, client, sequentia))
     }
 
-    /// Reads a node's chain: its genesis hash and policy asset.
-    fn network_from_node(url: &str, auth: &Auth, chain: RegtestChain) -> Result<SimplicityNetwork, TestError> {
+    /// Reads a node's chain from the node itself, never from a configuration key: a Sequentia
+    /// node answers `getfeeexchangerates`, and its genesis says which Sequentia network it runs.
+    /// Any other node is refused, so a misconfigured one is never treated as Elements.
+    fn network_from_node(url: &str, auth: &Auth) -> Result<SimplicityNetwork, TestError> {
         let rpc = ElementsRpc::new(url.to_string(), auth.clone()).map_err(ProviderError::from)?;
-        let (genesis_hash, policy_asset) = rpc.chain_identity().map_err(ProviderError::from)?;
 
-        Ok(match chain {
-            RegtestChain::Sequentia => SimplicityNetwork::SequentiaRegtest {
-                policy_asset,
-                genesis_hash,
-            },
-            RegtestChain::Elements => SimplicityNetwork::ElementsCustom {
-                policy_asset,
-                genesis_hash,
-            },
-        })
+        Ok(rpc.sequentia_network().map_err(ProviderError::from)?)
     }
 }
 
@@ -298,6 +293,61 @@ mod tests {
         assert!(
             matches!(e, TestError::BadNetworkName(ref s) if s == "InvalidNetwork"),
             "expected BadNetworkName, got: {e}"
+        );
+    }
+
+    #[test]
+    fn liquid_and_elements_networks_are_refused() {
+        for (name, network) in [
+            ("Liquid", SimplicityNetwork::Liquid),
+            ("LiquidTestnet", SimplicityNetwork::LiquidTestnet),
+            ("ElementsRegtest", SimplicityNetwork::default_regtest()),
+        ] {
+            let config = format!(
+                r#"
+                mnemonic = "exist carry drive collect lend cereal occur much tiger just involve mean"
+                bitcoins = 10000
+
+                [esplora]
+                url = "http://localhost:3000"
+                network = "{name}"
+            "#
+            );
+
+            let path = std::env::temp_dir().join(format!("smplx_test_refused_{name}_{}.toml", std::process::id()));
+            fs::write(&path, config).unwrap();
+
+            let Err(e) = TestContext::new(path.clone()) else {
+                panic!("{name} was accepted")
+            };
+            let _ = fs::remove_file(path);
+            assert!(
+                matches!(e, TestError::Unsupported(refused) if refused == UnsupportedNetwork(network)),
+                "{name}: expected the network refused, got: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_elements_regtest_is_refused() {
+        let config = r#"
+            mnemonic = "exist carry drive collect lend cereal occur much tiger just involve mean"
+            bitcoins = 10000
+
+            [regtest]
+            chain = "elements"
+        "#;
+
+        let path = std::env::temp_dir().join(format!("smplx_test_elements_regtest_{}.toml", std::process::id()));
+        fs::write(&path, config).unwrap();
+
+        let Err(e) = TestContext::new(path.clone()) else {
+            panic!("an Elements regtest was started")
+        };
+        let _ = fs::remove_file(path);
+        assert!(
+            e.to_string().contains("Sequentia's transaction encoding only"),
+            "expected the Elements regtest refused, got: {e}"
         );
     }
 }

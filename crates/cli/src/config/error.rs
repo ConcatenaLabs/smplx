@@ -16,11 +16,14 @@ pub enum ConfigError {
     #[error(transparent)]
     Dependency(#[from] DependencyValidationError),
 
-    #[error("Network name should be `Liquid`, `LiquidTestnet`, `ElementsRegtest` or `SequentiaTestnet`, got: {0}")]
+    #[error("Network name should be `SequentiaTestnet`, got: {0}")]
     BadNetworkName(String),
 
-    #[error("Network name should be `ElementsRegtest` when RPC is specified, got: {0}")]
-    NetworkNameUnmatched(String),
+    #[error(
+        "{0} is not a Sequentia network. This build of Simplex speaks Sequentia's transaction encoding only; \
+         use upstream Simplex for Liquid and Elements"
+    )]
+    UnsupportedNetwork(String),
 
     #[error("Unable to deserialize config: {0}")]
     UnableToDeserialize(toml::de::Error),

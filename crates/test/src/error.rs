@@ -18,8 +18,11 @@ pub enum TestError {
     #[error("io error occurred: '{0}'")]
     Io(#[from] io::Error),
 
-    #[error("Network name should be `Liquid`, `LiquidTestnet`, `ElementsRegtest` or `SequentiaTestnet`, got: {0}")]
+    #[error("Network name should be `SequentiaTestnet`, got: {0}")]
     BadNetworkName(String),
+
+    #[error(transparent)]
+    Unsupported(#[from] smplx_sdk::provider::UnsupportedNetwork),
 
     #[error("Occurred a network utils execution error: '{0}'")]
     NetworkUtilsExecution(#[from] NetworkUtilsError),
