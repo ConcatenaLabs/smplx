@@ -22,7 +22,7 @@ networks, the regtest chain).
 | Sends | No asset is a default, so a send names its asset: `Signer::send`, which assumes the policy asset, is refused with `SignerError::AssetUnnamed`. Use `Signer::send_asset` |
 | Simplicity budget | A spend earns four weight units of execution budget per byte of its witness, plus 50, up to 4,000,050; Elements gives one. An annex of up to 100,000 bytes relays on a Simplicity leaf. The signer pads a program that costs more than its witness earns (see below) |
 | Change | Explicit. It is blinded only when the transaction spends a confidential input and has no other blinded output, because it cannot balance otherwise. An output is confidential only when the holder asks for it with a blinding key |
-| Local chain | `sequentiad` runs two nodes: a Bitcoin-mode regtest parent and an `elementsregtest` custom chain anchored to it, so headers carry a Bitcoin anchor as on every live chain. Simplicity is active from genesis, addresses are unblinded and the open fee market is on. The chain is read over the node's RPC alone; no indexer runs |
+| Local chain | `sequentiad` runs two nodes: a Bitcoin-mode regtest parent and an `elementsregtest` custom chain anchored to it, so headers carry a Bitcoin anchor as on every live chain. Simplicity is active from genesis, addresses are unblinded and the open fee market is on. Scripts are checked on one thread, so a block the node refuses names the script failure rather than a bare `block-validation-failed`. The chain is read over the node's RPC alone; no indexer runs |
 
 ## Using it in a project
 
@@ -167,7 +167,10 @@ and spend it; issue an asset and move confidential outputs; pay to a tree with a
 Simplicity leaf and a tapscript exit and spend it by each leaf, paying fees in
 an asset they issue and checking each spend's estimate against the weight the
 node reports; and spend a program that needs padding with and without it. Invalid spends are forced into
-blocks as well as offered to the mempool, to show that consensus refuses them.
+blocks as well as offered to the mempool, to show that consensus refuses them,
+and each refusal is checked for the reason it was meant to have. Each signature
+is also offered where it must not count: over another coin, on the other leaf
+of the tree, on another chain, and with its padding altered.
 
 ## Things to know before writing a contract
 
