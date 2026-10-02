@@ -32,6 +32,12 @@ the [`Sequentia`](https://github.com/ConcatenaLabs/Sequentia) repository.
 - **Simplicity active from genesis.** A test chain needs
   `-evbparams=simplicity:-1:::`; the form `simplicity:0:::` activates only at
   height 384, and until then a Simplicity output is spendable by anyone.
+- **Signatures have fixed lengths.** The signer grinds every ECDSA signature
+  to 71 bytes with its sighash byte, so a spend's weight is known before it is
+  signed and its fee is right the first time. Plain low-R signing is 70 or 71
+  bytes, and a fee set on the draft can then fall one weight unit short.
+- **Padding is fixed before signing.** A full signature hash commits to every
+  input's annex, so every annex is in place before any signature that counts.
 - **The compiler is pinned upstream.** `simplicityhl` is the version upstream
   pins, the same one `sequentia-contracts` pins. A different version moves
   commitment roots, and with them addresses.
