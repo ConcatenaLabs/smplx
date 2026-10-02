@@ -5,6 +5,8 @@ use simplicityhl::simplicity::hashes::{Hash, sha256};
 
 use elements_miniscript::bitcoin::NetworkKind;
 
+use crate::program::BudgetRule;
+
 use crate::constants::{
     LIQUID_DEFAULT_REGTEST_ASSET_STR, LIQUID_POLICY_ASSET_STR, LIQUID_TESTNET_POLICY_ASSET_STR,
     SEQUENTIA_TESTNET_GENESIS_STR, SEQUENTIA_TESTNET_POLICY_ASSET_STR,
@@ -158,6 +160,15 @@ impl SimplicityNetwork {
         }
     }
 
+    /// How this network turns a Simplicity spend's witness into execution budget, and the
+    /// largest annex it relays to raise it.
+    #[must_use]
+    pub fn simplicity_budget(&self) -> BudgetRule {
+        let _ = self;
+
+        BudgetRule::ELEMENTS
+    }
+
     /// Returns the address parameters associated with the current enum variant.
     #[must_use]
     pub const fn address_params(&self) -> &'static elements::AddressParams {
@@ -243,6 +254,7 @@ mod tests {
         );
         assert_eq!(sequentia.address_params().bech_hrp.as_str(), "tb");
         assert_eq!(sequentia.address_params().blech_hrp.as_str(), "tsqb");
+        assert_eq!(liquid.simplicity_budget(), BudgetRule::ELEMENTS);
         assert_eq!(NetworkKind::from(&testnet), NetworkKind::Test);
         assert_eq!(NetworkKind::from(regtest), NetworkKind::Test);
     }

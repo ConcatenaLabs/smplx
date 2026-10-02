@@ -811,13 +811,44 @@ impl Signer {
 
     fn sign_tx(&self, tx: &FinalTransaction) -> Result<Transaction, SignerError> {
         let (mut pst, secrets) = tx.extract_pst();
-        let inputs = tx.inputs();
 
         if tx.needs_blinding() {
             pst.blind_last(&mut thread_rng(), &self.secp, &secrets)?;
         }
 
-        for (index, input_i) in inputs.iter().enumerate() {
+        // A full signature hash over a Simplicity input commits to every input's annex, so every
+        // annex is fixed before the signatures that count are made. The first pass signs with
+        // none and learns what each program costs and what its witness earns; when some program
+        // needs padding, the next pass puts each annex in place first and signs again. Padding
+        // does not change a program, so the second pass normally settles it; a third covers a
+        // program that reads its own annex.
+        let mut annexes: Vec<Option<Vec<u8>>> = vec![None; tx.n_inputs()];
+
+        for _ in 0..3 {
+            for (input, annex) in pst.inputs_mut().iter_mut().zip(&annexes) {
+                input.final_script_witness = annex.clone().map(|annex| vec![annex]);
+            }
+
+            if !self.sign_inputs(tx, &mut pst, &mut annexes)? {
+                return Ok(pst.extract_tx()?);
+            }
+        }
+
+        Err(SignerError::PaddingUnsettled)
+    }
+
+    /// Signs and finalizes every input with the given annexes in place. Returns whether some
+    /// Simplicity input needs more padding than it was given, having recorded what it needs.
+    fn sign_inputs(
+        &self,
+        tx: &FinalTransaction,
+        pst: &mut PartiallySignedTransaction,
+        annexes: &mut [Option<Vec<u8>>],
+    ) -> Result<bool, SignerError> {
+        let rule = self.network.simplicity_budget();
+        let mut short = false;
+
+        for (index, input_i) in tx.inputs().iter().enumerate() {
             // We need to prune the program
             if let Some(program_input) = &input_i.program_input {
                 let signing_info: Option<(&String, &[String], &SigMessage)> = match &input_i.required_sig {
@@ -831,10 +862,10 @@ impl Signer {
                     _ => None,
                 };
 
-                let signed_witness: Result<WitnessValues, SignerError> = match signing_info {
+                let signed_witness = match signing_info {
                     // Sign the program and inject the signature into the witness
-                    Some((witness_name, sig_path, message)) => Ok(self.get_signed_program_witness(
-                        &pst,
+                    Some((witness_name, sig_path, message)) => self.get_signed_program_witness(
+                        pst,
                         program_input.program.as_ref(),
                         &program_input.witness.build_witness(),
                         witness_name,
@@ -842,14 +873,14 @@ impl Signer {
                         index,
                         input_i.partial_input.derivation_path.as_ref(),
                         message,
-                    )?),
+                    )?,
                     // Just build the witness
-                    None => Ok(program_input.witness.build_witness()),
+                    None => program_input.witness.build_witness(),
                 };
 
-                let pruned_witness = program_input
+                let spend = program_input
                     .program
-                    .finalize(&pst, &signed_witness.unwrap(), index, &self.network)
+                    .finalize_spend(pst, &signed_witness, index, &self.network)
                     .map_err(|source| SignerError::CovenantExecution {
                         index,
                         locktime: pst.locktime().map_or(0, LockTime::to_consensus_u32),
@@ -859,23 +890,40 @@ impl Signer {
                         source,
                     })?;
 
-                pst.inputs_mut()[index].final_script_witness = Some(pruned_witness);
+                let mut stack = spend.stack;
+
+                if let Some(annex) = &annexes[index] {
+                    stack.push(annex.clone());
+                }
+
+                if !rule.covers(spend.cost, &stack) {
+                    if annexes[index].is_some() {
+                        stack.pop();
+                    }
+
+                    annexes[index] = rule
+                        .padding(spend.cost, &stack)
+                        .map_err(|source| SignerError::Budget { index, source })?;
+                    short = true;
+                }
+
+                pst.inputs_mut()[index].final_script_witness = Some(stack);
             } else if let Some(tapscript) = &input_i.tapscript_input {
                 let witness =
-                    self.tapscript_witness(&pst, index, tapscript, input_i.partial_input.derivation_path.as_ref())?;
+                    self.tapscript_witness(pst, index, tapscript, input_i.partial_input.derivation_path.as_ref())?;
 
                 pst.inputs_mut()[index].final_script_witness = Some(witness);
             } else {
                 // We need to sign the UTXO as is
                 // TODO: do we always sign?
-                let signed_witness = self.sign_input(&pst, index, input_i.partial_input.derivation_path.as_ref())?;
+                let signed_witness = self.sign_input(pst, index, input_i.partial_input.derivation_path.as_ref())?;
                 let raw_sig = elementssig_to_rawsig(&(signed_witness.1, EcdsaSighashType::All));
 
                 pst.inputs_mut()[index].final_script_witness = Some(vec![raw_sig, signed_witness.0.to_bytes()]);
             }
         }
 
-        Ok(pst.extract_tx()?)
+        Ok(short)
     }
 
     /// The witness of a tapscript leaf spend: its items, the leaf script, the control block.
