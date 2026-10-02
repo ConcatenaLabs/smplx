@@ -10,6 +10,10 @@ use super::error::CommandError;
 /// Nextest dsl variable to filter and use only simplex tests
 const SMPLX_NEXTEST_DSL_TEST_MARKER: &str = concat!("test(/", smplx_test_marker!(), "$/)");
 const DEFAULT_THREADS_NUMBER: usize = 1;
+/// Overrides the nextest binary `simplex test` runs.
+const NEXTEST_ENV_NAME: &str = "SIMPLEX_NEXTEST";
+const SMPLX_NEXTEST_BIN: &str = "smplx-nextest";
+const CARGO_NEXTEST_BIN: &str = "cargo-nextest";
 
 pub struct Test {}
 
@@ -52,6 +56,25 @@ impl Test {
         Self::result_from_status(output.status)
     }
 
+    /// The nextest binary: `SIMPLEX_NEXTEST` when set, else `smplx-nextest` (what `simplexup`
+    /// installs) when it is on `PATH`, else a stock `cargo-nextest`.
+    fn nextest_bin() -> std::ffi::OsString {
+        if let Some(bin) = std::env::var_os(NEXTEST_ENV_NAME) {
+            return bin;
+        }
+
+        let on_path = |name: &str| {
+            std::env::var_os("PATH")
+                .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).is_file()))
+        };
+
+        if on_path(SMPLX_NEXTEST_BIN) || !on_path(CARGO_NEXTEST_BIN) {
+            SMPLX_NEXTEST_BIN.into()
+        } else {
+            CARGO_NEXTEST_BIN.into()
+        }
+    }
+
     fn result_from_status(status: std::process::ExitStatus) -> Result<(), CommandError> {
         match status.code() {
             Some(0) => Ok(()),
@@ -65,7 +88,7 @@ impl Test {
         args: &TestArguments,
         flags: &TestFlags,
     ) -> std::process::Command {
-        let mut cargo_nextest_command = std::process::Command::new("smplx-nextest");
+        let mut cargo_nextest_command = std::process::Command::new(Self::nextest_bin());
         cargo_nextest_command.arg("nextest");
         cargo_nextest_command.arg("run");
 
