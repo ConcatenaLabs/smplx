@@ -26,7 +26,9 @@ the [`Sequentia`](https://github.com/ConcatenaLabs/Sequentia) repository.
 - **No fee fallback.** On a Sequentia network the signer pays in the asset it is
   given or the one asset a transaction moves. Never default it to the policy
   asset: on Sequentia that asset (the Sequence token) is one fee asset among
-  equals, and a mainnet node accepts none until its operator lists them.
+  equals, and a mainnet node accepts none until its operator lists them. For
+  the same reason no asset is sent by default: `Signer::send` is refused on a
+  Sequentia network, and a send names its asset with `send_asset`.
 - **Explicit by default.** Change on Sequentia is explicit unless a confidential
   input forces a blinded output. Never make confidentiality the default.
 - **Simplicity active from genesis.** A test chain needs

@@ -1,3 +1,4 @@
+use simplex::signer::SignerError;
 use simplex::simplicityhl::elements::Script;
 
 use simplex::transaction::{FinalTransaction, PartialInput, ProgramInput, RequiredSignature, TxReceipt};
@@ -23,7 +24,13 @@ fn spend_p2wpkh(context: &simplex::TestContext) -> anyhow::Result<TxReceipt<'_>>
 
     let (_, p2pk_script) = get_p2pk(context);
 
-    let tx_receipt = signer.send(p2pk_script.clone(), 50)?;
+    // On Sequentia no asset is a default: `send` is refused, and a send names its asset.
+    anyhow::ensure!(
+        matches!(signer.send(p2pk_script.clone(), 50), Err(SignerError::AssetUnnamed)),
+        "a send that names no asset was not refused"
+    );
+
+    let tx_receipt = signer.send_asset(p2pk_script.clone(), 50, context.get_network().policy_asset())?;
     println!("Broadcast: {}", tx_receipt);
 
     Ok(tx_receipt)
