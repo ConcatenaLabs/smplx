@@ -46,6 +46,9 @@ pub const CHAIN_ARGS: &[&str] = &[
     "-evbparams=simplicity:-1:::",
     "-txindex=1",
     "-fallbackfee=0.0001",
+    // Scripts checked on one thread: a refused block then names the script failure, rather
+    // than the bare `block-validation-failed` that parallel checking reports.
+    "-par=1",
 ];
 
 /// One running `sequentiad`.

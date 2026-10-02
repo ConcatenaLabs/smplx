@@ -84,14 +84,25 @@ fn signed(
     Ok((pst.extract_tx()?, spend))
 }
 
-fn refused(utils: &simplex::NetworkUtils, what: &str, tx: &Transaction) -> anyhow::Result<()> {
+/// The node's message for a program that costs more than its witness earns.
+const OVER_BUDGET: &str = "Program's execution cost could exceed budget";
+
+/// Asks the mempool, then forces `tx` into a block; both must refuse it, and the block for
+/// `reason`. A refusal for any other reason fails the test: it would prove nothing.
+fn refused(utils: &simplex::NetworkUtils, what: &str, tx: &Transaction, reason: &str) -> anyhow::Result<()> {
     let rpc = utils.rpc();
     let mempool = rpc.test_mempool_accept(tx)?;
     let block = rpc.generate_block_with(std::slice::from_ref(tx))?;
 
     println!("REFUSED {what}: mempool: {mempool:?}; block: {block:?}");
     anyhow::ensure!(mempool.is_err(), "{what}: the mempool accepted it");
-    anyhow::ensure!(block.is_err(), "{what}: a block holding it was accepted");
+    match block {
+        Ok(_) => anyhow::bail!("{what}: a block holding it was accepted"),
+        Err(message) => anyhow::ensure!(
+            message.contains(reason),
+            "{what}: the block was refused, but not for {reason:?}: {message}"
+        ),
+    }
 
     Ok(())
 }
@@ -145,7 +156,7 @@ fn budget_test(context: simplex::TestContext) -> anyhow::Result<()> {
         !rule.covers(spend.cost, &spend.stack),
         "the program fits its unpadded budget"
     );
-    refused(&utils, "unpadded", &unpadded)?;
+    refused(&utils, "unpadded", &unpadded, OVER_BUDGET)?;
 
     // The smallest annex that covers the cost, and one byte less.
     let annex = rule
@@ -156,6 +167,7 @@ fn budget_test(context: simplex::TestContext) -> anyhow::Result<()> {
         &utils,
         &format!("annex of {} bytes, one short", annex.len() - 1),
         &short,
+        OVER_BUDGET,
     )?;
 
     let (padded, padded_spend) = signed(&tree, signer, &network, pst, Some(&annex))?;
@@ -166,6 +178,19 @@ fn budget_test(context: simplex::TestContext) -> anyhow::Result<()> {
         "PADDED annex {} bytes; witness {} bytes earns {} WU for a cost of {} milli-WU",
         report.annex_bytes, report.witness_bytes, report.budget, report.cost_milliweight
     );
+
+    // The signature commits to the annex: padding altered after signing breaks it, so a relay
+    // cannot strip or change the budget a spend paid for.
+    let mut altered = padded.clone();
+    let stack = &mut altered.input[0].witness.script_witness;
+    *stack.last_mut().unwrap().last_mut().unwrap() ^= 0x01;
+    refused(
+        &utils,
+        "annex altered after signing",
+        &altered,
+        "Assertion failed inside jet",
+    )?;
+
     accepted(&utils, &format!("annex of {} bytes", annex.len()), &padded)?;
 
     // The signer pads by itself, with the same annex, and its estimate made before signing

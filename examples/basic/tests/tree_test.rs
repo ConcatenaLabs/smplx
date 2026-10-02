@@ -8,6 +8,10 @@
 //! The program and its data leaf keep the fixed-root layout, so `jet::tappath(0)` is still the
 //! data leaf; the exit sits one level up.
 //!
+//! Each signature is also offered where it must not count: over another coin, on the other leaf,
+//! and on another chain. The node runs with one script-checking thread, so a refused block names
+//! the script failure, and each refusal is checked for the reason it was meant to have.
+//!
 //! The coins are an asset the test issues, valued by the node at three reference units an atom,
 //! and each spend pays its fee in that asset. The signer's estimate of each spend, made before it
 //! signs, must equal the weight the node reports once the spend is confirmed, and its fee must be
@@ -17,12 +21,14 @@ use simplex::simplicityhl::elements::opcodes::all::{OP_CHECKSIG, OP_CSV, OP_DROP
 use simplex::simplicityhl::elements::script::Builder;
 use simplex::simplicityhl::elements::{Script, Sequence, Transaction};
 
-use simplex::signer::{Signer, SpendEstimate};
+use simplex::provider::SimplicityNetwork;
+use simplex::signer::{Signer, SignerTrait, SpendEstimate};
 use simplex::simplicityhl::elements::AssetId;
+use simplex::simplicityhl::elements::pset::PartiallySignedTransaction;
 use simplex::taptree::{ContractTree, TapTree};
 use simplex::transaction::partial_input::IssuanceInput;
 use simplex::transaction::{
-    FinalTransaction, PartialInput, PartialOutput, ProgramInput, RequiredSignature, TapscriptWitness, UTXO,
+    FinalTransaction, PartialInput, PartialOutput, ProgramInput, RequiredSignature, SigMessage, TapscriptWitness, UTXO,
 };
 
 use simplex_example::artifacts::one_key::OneKeyProgram;
@@ -80,17 +86,36 @@ fn exit_spend(tree: &ContractTree, coin: UTXO) -> anyhow::Result<FinalTransactio
     Ok(ft)
 }
 
-/// Asks the mempool, then forces `tx` into a block; both must refuse it. Returns their messages.
-fn refused(utils: &simplex::NetworkUtils, what: &str, tx: &Transaction) -> anyhow::Result<()> {
+/// Asks the mempool, then forces `tx` into a block; both must refuse it, and the block for
+/// `reason`. A refusal for any other reason fails the test: it would prove nothing.
+fn refused(utils: &simplex::NetworkUtils, what: &str, tx: &Transaction, reason: &str) -> anyhow::Result<()> {
     let rpc = utils.rpc();
     let mempool = rpc.test_mempool_accept(tx)?;
     let block = rpc.generate_block_with(std::slice::from_ref(tx))?;
 
     println!("REFUSED {what}: mempool: {mempool:?}; block: {block:?}");
     anyhow::ensure!(mempool.is_err(), "{what}: the mempool accepted it");
-    anyhow::ensure!(block.is_err(), "{what}: a block holding it was accepted");
+    match block {
+        Ok(_) => anyhow::bail!("{what}: a block holding it was accepted"),
+        Err(message) => anyhow::ensure!(
+            message.contains(reason),
+            "{what}: the block was refused, but not for {reason:?}: {message}"
+        ),
+    }
 
     Ok(())
+}
+
+/// A partially signed copy of `tx`, carrying the outputs its inputs spend, from which a signature
+/// over `tx` can be made again.
+fn reopened(tx: &Transaction, spent: &[&UTXO]) -> PartiallySignedTransaction {
+    let mut pst = PartiallySignedTransaction::from_tx(tx.clone());
+
+    for (input, coin) in pst.inputs_mut().iter_mut().zip(spent) {
+        input.witness_utxo = Some(coin.txout.clone());
+    }
+
+    pst
 }
 
 /// Forces `tx` into a block and requires the node to take it. Returns the weight the node reports.
@@ -220,13 +245,67 @@ fn tree_test(context: simplex::TestContext) -> anyhow::Result<()> {
     // Another transaction's witness: a signature over a different coin's spend.
     let mut replayed = other_coin.clone();
     replayed.input[0].witness = by_key.input[0].witness.clone();
-    refused(&utils, "key leaf with a signature over another transaction", &replayed)?;
+    refused(
+        &utils,
+        "key leaf with a signature over another transaction",
+        &replayed,
+        "Assertion failed inside jet",
+    )?;
 
     // The program revealed under the exit leaf's control block.
     let mut wrong_leaf = by_key.clone();
     let stack = &mut wrong_leaf.input[0].witness.script_witness;
     *stack.last_mut().unwrap() = tree.control_block("exit")?.serialize();
-    refused(&utils, "key leaf under the exit's control block", &wrong_leaf)?;
+    refused(
+        &utils,
+        "key leaf under the exit's control block",
+        &wrong_leaf,
+        "Witness program hash mismatch",
+    )?;
+
+    // The other signatures over these coins, offered where they must not count. A signer with the
+    // same keys on a chain with another genesis signs the key leaf; the exit leaf's signature over
+    // a valid key-leaf spend stands in for the program's.
+    let elsewhere = Signer::from_mnemonic(
+        &context.get_config().mnemonic,
+        SimplicityNetwork::SequentiaRegtest {
+            policy_asset: network.policy_asset(),
+            genesis_hash: SimplicityNetwork::SequentiaTestnet.genesis_block_hash(),
+        },
+    )
+    .with_fee_exchange_rate(gold, GOLD_RATE);
+    anyhow::ensure!(elsewhere.get_schnorr_public_key() == signer.get_schnorr_public_key());
+
+    let (key_elsewhere, _) = elsewhere.finalize_strict(&key_spend(&tree, &elsewhere, coins[1].clone())?, fee_rate)?;
+    refused(
+        &utils,
+        "key leaf signed for another chain",
+        &key_elsewhere,
+        "Assertion failed inside jet",
+    )?;
+
+    let pk = signer.get_schnorr_public_key().serialize();
+    let mut exit_sig_on_key = other_coin.clone();
+    let exit_sig = signer.sign_tapscript(
+        &reopened(&other_coin, &[&coins[1]]),
+        0,
+        &exit_script(&pk),
+        &network,
+        None,
+    )?;
+    // The one-key program's witness is its two values, the key and then the signature.
+    let program_witness = &mut exit_sig_on_key.input[0].witness.script_witness[0];
+    anyhow::ensure!(
+        program_witness.len() == 96 && program_witness[..32] == pk,
+        "the program's witness is not the key and the signature"
+    );
+    program_witness[32..].copy_from_slice(&exit_sig.serialize());
+    refused(
+        &utils,
+        "key leaf carrying the exit leaf's signature over the same transaction",
+        &exit_sig_on_key,
+        "Assertion failed inside jet",
+    )?;
 
     let key_weight = accepted(&utils, "key leaf", &by_key)?;
     anyhow::ensure!(
@@ -238,14 +317,49 @@ fn tree_test(context: simplex::TestContext) -> anyhow::Result<()> {
     // once the delay has passed.
     utils.mine_until_height(confirmed_at + u64::from(EXIT_BLOCKS) - 2)?;
     let (early, _) = signer.finalize(&exit_spend(&tree, coins[2].clone())?)?;
-    refused(&utils, "exit one block before its delay ends", &early)?;
+    refused(
+        &utils,
+        "exit one block before its delay ends",
+        &early,
+        "bad-txns-nonfinal",
+    )?;
 
     utils.mine_until_height(confirmed_at + u64::from(EXIT_BLOCKS) - 1)?;
     let (exit_estimate, by_exit) = estimated_and_signed(signer, &exit_spend(&tree, coins[2].clone())?, fee_rate, gold)?;
 
     let mut forged = by_exit.clone();
     forged.input[0].witness.script_witness[0][0] ^= 0x01;
-    refused(&utils, "exit with a broken signature", &forged)?;
+    refused(
+        &utils,
+        "exit with a broken signature",
+        &forged,
+        "Invalid Schnorr signature",
+    )?;
+
+    let (exit_elsewhere, _) = elsewhere.finalize_strict(&exit_spend(&tree, coins[2].clone())?, fee_rate)?;
+    refused(
+        &utils,
+        "exit signed for another chain",
+        &exit_elsewhere,
+        "Invalid Schnorr signature",
+    )?;
+
+    let mut key_sig_on_exit = by_exit.clone();
+    let key_sig = signer.sign_program(
+        &reopened(&by_exit, &[&coins[2]]),
+        &tree.program("key")?,
+        0,
+        &network,
+        None,
+        &SigMessage::Sighash,
+    )?;
+    key_sig_on_exit.input[0].witness.script_witness[0] = key_sig.serialize().to_vec();
+    refused(
+        &utils,
+        "exit carrying the key leaf's signature over the same transaction",
+        &key_sig_on_exit,
+        "Invalid Schnorr signature",
+    )?;
 
     let exit_weight = accepted(&utils, "exit leaf", &by_exit)?;
     anyhow::ensure!(
