@@ -24,7 +24,9 @@ impl RegtestClient {
     /// Panics if binding to a local ZMQ port fails, or if starting the node executables fails.
     #[must_use]
     pub fn new(config: &RegtestConfig) -> Self {
-        let (electrs_path, elementsd_path) = Self::default_bin_paths();
+        let (default_electrs, default_elementsd) = Self::default_bin_paths();
+        let electrs_path = config.electrs_bin.clone().unwrap_or(default_electrs);
+        let elementsd_path = config.node_bin.clone().unwrap_or(default_elementsd);
         let zmq_addr = Self::get_zmq_addr();
         let elements = Self::create_bitcoind_node(elementsd_path, &zmq_addr, config);
         let electrs = Self::create_electrs_node(electrs_path, &elements, &zmq_addr, config);

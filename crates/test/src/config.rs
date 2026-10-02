@@ -25,6 +25,9 @@ pub struct TestConfig {
     pub rpc: Option<RpcConfig>,
     pub fuzz: Option<FuzzConfig>,
     pub verbosity: Verbosity,
+    /// The `[regtest]` settings the internal regtest starts from: its binaries. The
+    /// mnemonic and funds come from this config; ports and credentials are chosen afresh.
+    pub regtest: Option<RegtestConfig>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -65,6 +68,7 @@ impl TestConfig {
             esplora_port: None,
             rpc_user: None,
             rpc_password: None,
+            ..self.regtest.clone().unwrap_or_default()
         }
     }
 
@@ -91,6 +95,7 @@ impl Default for TestConfig {
             rpc: None,
             fuzz: None,
             verbosity: Verbosity::None,
+            regtest: None,
         }
     }
 }
@@ -116,6 +121,11 @@ mod tests {
                 username: "user".into(),
                 password: "password".into(),
             }),
+            regtest: Some(RegtestConfig {
+                node_bin: Some("/opt/elements/bin/elementsd".into()),
+                rpc_port: Some(18443),
+                ..RegtestConfig::default()
+            }),
             ..Default::default()
         };
 
@@ -136,6 +146,10 @@ mod tests {
         assert_eq!(regtest.mnemonic, config.mnemonic);
         assert_eq!(regtest.bitcoins, config.bitcoins);
         assert!(regtest.rpc_port.is_none());
+        assert_eq!(
+            regtest.node_bin.as_deref(),
+            Some(std::path::Path::new("/opt/elements/bin/elementsd"))
+        );
         assert!(regtest.esplora_port.is_none());
         assert!(regtest.rpc_user.is_none());
         assert!(regtest.rpc_password.is_none());
