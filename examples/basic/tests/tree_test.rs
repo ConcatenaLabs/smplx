@@ -14,7 +14,9 @@ use simplex::simplicityhl::elements::{Script, Sequence, Transaction};
 
 use simplex::signer::Signer;
 use simplex::taptree::{ContractTree, TapTree};
-use simplex::transaction::{FinalTransaction, PartialInput, ProgramInput, RequiredSignature, TapscriptWitness, UTXO};
+use simplex::transaction::{
+    FinalTransaction, PartialInput, PartialOutput, ProgramInput, RequiredSignature, TapscriptWitness, UTXO,
+};
 
 use simplex_example::artifacts::one_key::OneKeyProgram;
 use simplex_example::artifacts::one_key::derived_one_key::{OneKeyArguments, OneKeyWitness};
@@ -115,11 +117,12 @@ fn tree_test(context: simplex::TestContext) -> anyhow::Result<()> {
     let script = tree.script_pubkey();
     println!("tree output {}", tree.address(&network));
 
+    // Three coins in one payment, so they confirm in one block.
+    let mut payment = FinalTransaction::new();
     for _ in 0..3 {
-        signer
-            .send_asset(script.clone(), AMOUNT, network.policy_asset())?
-            .wait()?;
+        payment.add_output(PartialOutput::new(script.clone(), AMOUNT, network.policy_asset()));
     }
+    signer.broadcast(&payment)?.wait()?;
     let confirmed_at = utils.rpc().height()?;
 
     let mut coins = provider.fetch_scripthash_utxos(&script)?;
