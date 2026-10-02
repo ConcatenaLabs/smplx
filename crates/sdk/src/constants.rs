@@ -22,3 +22,10 @@ pub const LIQUID_DEFAULT_REGTEST_ASSET_STR: &str = "5ac9f65c0efcc4775e0baec4ec03
 
 /// Example test `AssetId` (hex, BE) on Liquid testnet.
 pub const LIQUID_TESTNET_TEST_ASSET_ID_STR: &str = "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5";
+
+/// Policy `AssetId` (hex, BE) of the Sequentia testnet: the Sequence token, one fee asset
+/// among any the node accepts.
+pub const SEQUENTIA_TESTNET_POLICY_ASSET_STR: &str = "c8eccacf0953e1931cd31e434d8319101cc36e6c38b0e2104d8687552fae3e40";
+
+/// Genesis block hash (hex, display order) of the Sequentia testnet.
+pub const SEQUENTIA_TESTNET_GENESIS_STR: &str = "ddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e";

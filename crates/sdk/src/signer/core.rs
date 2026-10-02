@@ -694,7 +694,7 @@ impl Signer {
         fee_tx.add_output(PartialOutput::new(Script::new(), PLACEHOLDER_FEE, fee_asset.asset));
 
         let final_tx = self.sign_tx(&fee_tx)?;
-        let fee = fee_asset.atoms(fee_tx.calculate_fee(final_tx.discount_weight(), fee_rate));
+        let fee = fee_asset.atoms(fee_tx.calculate_fee(self.fee_weight(&final_tx), fee_rate));
 
         if available_delta > fee && available_delta - fee >= MIN_FEE {
             // We have enough funds to cover the change UTXO
@@ -730,7 +730,7 @@ impl Signer {
         fee_tx.remove_output(change_index);
 
         let final_tx = self.sign_tx(&fee_tx)?;
-        let fee = fee_asset.atoms(fee_tx.calculate_fee(final_tx.discount_weight(), fee_rate));
+        let fee = fee_asset.atoms(fee_tx.calculate_fee(self.fee_weight(&final_tx), fee_rate));
 
         if available_delta < fee {
             return Ok(Estimate::Failure(fee));
@@ -749,6 +749,15 @@ impl Signer {
         let final_tx = self.sign_tx(&fee_tx)?;
 
         Ok(Estimate::Success(final_tx, fee))
+    }
+
+    /// The weight the network charges a fee on.
+    fn fee_weight(&self, tx: &Transaction) -> usize {
+        if self.network.discounted_ct_fees() {
+            tx.discount_weight()
+        } else {
+            tx.weight()
+        }
     }
 
     fn sign_tx(&self, tx: &FinalTransaction) -> Result<Transaction, SignerError> {
@@ -1064,6 +1073,81 @@ mod tests {
             signer.fee_exchange_rate(asset),
             Err(SignerError::FeeAssetNotAccepted(_))
         ));
+    }
+
+    fn sequentia_signer() -> Signer {
+        Signer::from_mnemonic(random_mnemonic().as_str(), SimplicityNetwork::SequentiaTestnet)
+    }
+
+    #[test]
+    fn on_sequentia_the_fee_is_paid_in_the_one_asset_moved() {
+        let signer = sequentia_signer();
+        let gold = AssetId::from_slice(&[0x07; 32]).unwrap();
+        let mut ft = FinalTransaction::new();
+        ft.add_output(PartialOutput::new(Script::new(), 1, gold));
+
+        assert_eq!(signer.fee_asset_for(&ft).unwrap(), gold);
+    }
+
+    #[test]
+    fn on_sequentia_nothing_falls_back_to_the_policy_asset() {
+        let signer = sequentia_signer();
+        let gold = AssetId::from_slice(&[0x07; 32]).unwrap();
+        let silver = AssetId::from_slice(&[0x08; 32]).unwrap();
+
+        // Two assets moved and none named: refused, policy asset included.
+        let mut ft = FinalTransaction::new();
+        ft.add_output(PartialOutput::new(Script::new(), 1, gold));
+        ft.add_output(PartialOutput::new(Script::new(), 1, silver));
+        assert!(matches!(signer.fee_asset_for(&ft), Err(SignerError::FeeAssetUnset(_))));
+
+        // Nothing moved and none named: refused as well.
+        assert!(matches!(
+            signer.fee_asset_for(&FinalTransaction::new()),
+            Err(SignerError::FeeAssetUnset(_))
+        ));
+
+        // Naming one settles it.
+        let signer = signer.with_fee_asset(silver);
+        assert_eq!(signer.fee_asset_for(&ft).unwrap(), silver);
+
+        // With no provider and no configured rate, even the policy asset has no rate.
+        assert!(matches!(
+            signer.fee_exchange_rate(SimplicityNetwork::SequentiaTestnet.policy_asset()),
+            Err(SignerError::FeeAssetNotAccepted(_))
+        ));
+    }
+
+    #[test]
+    fn on_sequentia_change_is_explicit_and_paid_in_the_fee_asset() {
+        let gold = AssetId::from_slice(&[0x07; 32]).unwrap();
+        let signer = sequentia_signer().with_fee_exchange_rate(gold, FEE_EXCHANGE_RATE_SCALE * 2);
+        let mut ft = FinalTransaction::new();
+
+        ft.add_input(
+            PartialInput::new(UTXO {
+                outpoint: OutPoint::new(Txid::from_slice(&[0x01; 32]).unwrap(), 0),
+                txout: simplicityhl::elements::TxOut::new_fee(100_000, gold),
+                secrets: None,
+            }),
+            RequiredSignature::NativeEcdsa,
+        );
+        ft.add_output(PartialOutput::new(signer.get_address().script_pubkey(), 50_000, gold));
+
+        let (tx, fee) = signer.finalize_strict(&ft, 1_000.0).unwrap();
+
+        // At twice par, a fee of `vsize` reference units costs half as many atoms.
+        assert_eq!(fee, (tx.vsize() as u64).div_ceil(2));
+        for output in &tx.output {
+            assert!(output.asset.is_explicit() && output.value.is_explicit());
+            assert_eq!(output.asset.explicit(), Some(gold));
+        }
+        let change = tx
+            .output
+            .iter()
+            .find(|o| o.value.explicit() == Some(50_000 - fee))
+            .unwrap();
+        assert_eq!(change.script_pubkey, signer.get_address().script_pubkey());
     }
 
     #[test]

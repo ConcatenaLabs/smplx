@@ -5,7 +5,10 @@ use simplicityhl::simplicity::hashes::{Hash, sha256};
 
 use elements_miniscript::bitcoin::NetworkKind;
 
-use crate::constants::{LIQUID_DEFAULT_REGTEST_ASSET_STR, LIQUID_POLICY_ASSET_STR, LIQUID_TESTNET_POLICY_ASSET_STR};
+use crate::constants::{
+    LIQUID_DEFAULT_REGTEST_ASSET_STR, LIQUID_POLICY_ASSET_STR, LIQUID_TESTNET_POLICY_ASSET_STR,
+    SEQUENTIA_TESTNET_GENESIS_STR, SEQUENTIA_TESTNET_POLICY_ASSET_STR,
+};
 
 /// The default Bitcoin `AssetId` used on Liquid testnet.
 pub static LIQUID_TESTNET_BITCOIN_ASSET: std::sync::LazyLock<elements::AssetId> = std::sync::LazyLock::new(|| {
@@ -58,6 +61,16 @@ pub enum SimplicityNetwork {
         /// Custom network genesis block hash.
         genesis_hash: elements::BlockHash,
     },
+    /// The Sequentia testnet (`-chain=test`).
+    SequentiaTestnet,
+    /// A local Sequentia chain: a custom chain such as `elementsregtest`, whose genesis and
+    /// policy asset are read from its node.
+    SequentiaRegtest {
+        /// The chain's policy asset. On Sequentia it is one fee asset among any the node accepts.
+        policy_asset: elements::AssetId,
+        /// The chain's genesis block hash.
+        genesis_hash: elements::BlockHash,
+    },
 }
 
 impl SimplicityNetwork {
@@ -80,18 +93,25 @@ impl SimplicityNetwork {
         match self {
             Self::Liquid => elements::AssetId::from_str(LIQUID_POLICY_ASSET_STR).unwrap(),
             Self::LiquidTestnet => elements::AssetId::from_str(LIQUID_TESTNET_POLICY_ASSET_STR).unwrap(),
-            Self::ElementsRegtest { policy_asset } | Self::ElementsCustom { policy_asset, .. } => *policy_asset,
+            Self::SequentiaTestnet => elements::AssetId::from_str(SEQUENTIA_TESTNET_POLICY_ASSET_STR).unwrap(),
+            Self::ElementsRegtest { policy_asset }
+            | Self::ElementsCustom { policy_asset, .. }
+            | Self::SequentiaRegtest { policy_asset, .. } => *policy_asset,
         }
     }
 
     /// Returns the genesis block hash for the network variant.
+    ///
+    /// # Panics
+    /// This function will panic if a built-in genesis hash constant cannot be parsed.
     #[must_use]
     pub fn genesis_block_hash(&self) -> elements::BlockHash {
         match self {
             Self::Liquid => *LIQUID_MAINNET_GENESIS,
             Self::LiquidTestnet => *LIQUID_TESTNET_GENESIS,
             Self::ElementsRegtest { .. } => *LIQUID_REGTEST_GENESIS,
-            Self::ElementsCustom { genesis_hash, .. } => *genesis_hash,
+            Self::SequentiaTestnet => elements::BlockHash::from_str(SEQUENTIA_TESTNET_GENESIS_STR).unwrap(),
+            Self::ElementsCustom { genesis_hash, .. } | Self::SequentiaRegtest { genesis_hash, .. } => *genesis_hash,
         }
     }
 
@@ -110,6 +130,7 @@ impl SimplicityNetwork {
     pub fn fee_asset_is_fixed(&self) -> bool {
         match self {
             Self::Liquid | Self::LiquidTestnet | Self::ElementsRegtest { .. } | Self::ElementsCustom { .. } => true,
+            Self::SequentiaTestnet | Self::SequentiaRegtest { .. } => false,
         }
     }
 
@@ -122,6 +143,18 @@ impl SimplicityNetwork {
     pub fn confidential_change_by_default(&self) -> bool {
         match self {
             Self::Liquid | Self::LiquidTestnet | Self::ElementsRegtest { .. } | Self::ElementsCustom { .. } => true,
+            Self::SequentiaTestnet | Self::SequentiaRegtest { .. } => false,
+        }
+    }
+
+    /// Whether this network's nodes charge a confidential transaction's fee on its discounted
+    /// weight. A Sequentia node does not unless started with `-acceptdiscountct=1`, so the signer
+    /// charges the full weight there.
+    #[must_use]
+    pub fn discounted_ct_fees(&self) -> bool {
+        match self {
+            Self::Liquid | Self::LiquidTestnet | Self::ElementsRegtest { .. } | Self::ElementsCustom { .. } => true,
+            Self::SequentiaTestnet | Self::SequentiaRegtest { .. } => false,
         }
     }
 
@@ -131,7 +164,10 @@ impl SimplicityNetwork {
         match self {
             Self::Liquid => &elements::AddressParams::LIQUID,
             Self::LiquidTestnet => &elements::AddressParams::LIQUID_TESTNET,
-            Self::ElementsRegtest { .. } | Self::ElementsCustom { .. } => &elements::AddressParams::ELEMENTS,
+            Self::SequentiaTestnet => &elements::AddressParams::SEQUENTIA_TESTNET,
+            Self::ElementsRegtest { .. } | Self::ElementsCustom { .. } | Self::SequentiaRegtest { .. } => {
+                &elements::AddressParams::ELEMENTS
+            }
         }
     }
 }
@@ -192,6 +228,21 @@ mod tests {
         }
 
         assert_eq!(NetworkKind::from(liquid), NetworkKind::Main);
+
+        let sequentia = SimplicityNetwork::SequentiaTestnet;
+        assert!(!sequentia.is_mainnet());
+        assert!(!sequentia.fee_asset_is_fixed());
+        assert!(!sequentia.confidential_change_by_default());
+        assert_eq!(
+            sequentia.policy_asset().to_string(),
+            "c8eccacf0953e1931cd31e434d8319101cc36e6c38b0e2104d8687552fae3e40"
+        );
+        assert_eq!(
+            sequentia.genesis_block_hash().to_string(),
+            "ddd11d54c87a2bd94400fd31ce05d8e1110bb4b78e7103f738342086fc4ea92e"
+        );
+        assert_eq!(sequentia.address_params().bech_hrp.as_str(), "tb");
+        assert_eq!(sequentia.address_params().blech_hrp.as_str(), "tsqb");
         assert_eq!(NetworkKind::from(&testnet), NetworkKind::Test);
         assert_eq!(NetworkKind::from(regtest), NetworkKind::Test);
     }
