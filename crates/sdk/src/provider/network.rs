@@ -52,6 +52,20 @@ pub const SEQUENTIA_SIMPLICITY_BUDGET: BudgetRule = BudgetRule {
     max_standard_annex: 100_000,
 };
 
+/// A network this build of Simplex refuses: any but Sequentia's.
+///
+/// The build parses and serialises every transaction in Sequentia's encoding, in which an
+/// issuance carries one more byte than in Elements', so it would read, sign and broadcast a
+/// Liquid or Elements transaction with an issuance wrongly. The Liquid and Elements variants of
+/// [`SimplicityNetwork`] stay, so the upstream code that names them still builds, but a signer,
+/// a provider, the test context and the regtest runner refuse them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "{0:?} is not a Sequentia network. This build of Simplex speaks Sequentia's transaction encoding only, \
+     which differs from Liquid's and Elements' in every issuance; use upstream Simplex for Liquid and Elements"
+)]
+pub struct UnsupportedNetwork(pub SimplicityNetwork);
+
 /// Represents the target network configuration for Simplicity interactions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SimplicityNetwork {
@@ -122,6 +136,24 @@ impl SimplicityNetwork {
             Self::ElementsRegtest { .. } => *LIQUID_REGTEST_GENESIS,
             Self::SequentiaTestnet => elements::BlockHash::from_str(SEQUENTIA_TESTNET_GENESIS_STR).unwrap(),
             Self::ElementsCustom { genesis_hash, .. } | Self::SequentiaRegtest { genesis_hash, .. } => *genesis_hash,
+        }
+    }
+
+    /// Whether this is a Sequentia network, the only kind this build works with.
+    #[must_use]
+    pub fn is_sequentia(&self) -> bool {
+        matches!(self, Self::SequentiaTestnet | Self::SequentiaRegtest { .. })
+    }
+
+    /// Refuses any network but Sequentia's.
+    ///
+    /// # Errors
+    /// Returns [`UnsupportedNetwork`] for Liquid and Elements networks.
+    pub fn require_sequentia(&self) -> Result<(), UnsupportedNetwork> {
+        if self.is_sequentia() {
+            Ok(())
+        } else {
+            Err(UnsupportedNetwork(*self))
         }
     }
 
@@ -284,5 +316,31 @@ mod tests {
         assert_eq!(liquid.default_asset(), Some(liquid.policy_asset()));
         assert_eq!(NetworkKind::from(&testnet), NetworkKind::Test);
         assert_eq!(NetworkKind::from(regtest), NetworkKind::Test);
+    }
+
+    #[test]
+    fn only_sequentia_networks_are_supported() {
+        let sequentia_regtest = SimplicityNetwork::SequentiaRegtest {
+            policy_asset: SimplicityNetwork::SequentiaTestnet.policy_asset(),
+            genesis_hash: SimplicityNetwork::SequentiaTestnet.genesis_block_hash(),
+        };
+
+        for network in [SimplicityNetwork::SequentiaTestnet, sequentia_regtest] {
+            assert!(network.require_sequentia().is_ok());
+        }
+
+        for network in [
+            SimplicityNetwork::Liquid,
+            SimplicityNetwork::LiquidTestnet,
+            SimplicityNetwork::default_regtest(),
+            SimplicityNetwork::ElementsCustom {
+                policy_asset: SimplicityNetwork::SequentiaTestnet.policy_asset(),
+                genesis_hash: SimplicityNetwork::SequentiaTestnet.genesis_block_hash(),
+            },
+        ] {
+            let refused = network.require_sequentia().unwrap_err();
+            assert_eq!(refused, UnsupportedNetwork(network));
+            assert!(refused.to_string().contains("Sequentia's transaction encoding only"));
+        }
     }
 }

@@ -188,13 +188,48 @@ impl SequentiaRegtestClient {
             password: random_password(),
         };
 
-        let parent = Daemon::start(
+        let mut parent = Daemon::start(
             &exe,
             workdir.join("parent"),
             &parent_rpc,
             &["-chain=regtest".to_string()],
         )?;
 
+        // Nothing is left running, nor any data left behind, when the chain fails to come up.
+        let (node, network) = match Self::start_node(&exe, &workdir, &rpc, &parent, &parent_rpc) {
+            Ok(started) => started,
+            Err(e) => {
+                parent.stop();
+                let _ = std::fs::remove_dir_all(&workdir);
+                return Err(e);
+            }
+        };
+
+        let client = Self {
+            node,
+            parent,
+            workdir,
+            network,
+            rpc_user: rpc.user,
+            rpc_password: rpc.password,
+            stopped: false,
+        };
+
+        client.node.call("createwallet", &[WALLET.into()])?;
+
+        Ok(client)
+    }
+
+    /// Starts the Sequentia node anchored to `parent`, and reads from the node which Sequentia
+    /// network it runs. A binary that is not Sequentia's is refused here, whatever the
+    /// configuration called it, and stopped.
+    fn start_node(
+        exe: &Path,
+        workdir: &Path,
+        rpc: &RpcSettings,
+        parent: &Daemon,
+        parent_rpc: &RpcSettings,
+    ) -> Result<(Daemon, SimplicityNetwork), RegtestError> {
         // An anchor is a parent block: give the parent a few.
         parent.call("generatetodescriptor", &[10.into(), OP_TRUE_DESCRIPTOR.into()])?;
         let parent_genesis = parent.call("getblockhash", &[0.into()])?;
@@ -213,29 +248,21 @@ impl SequentiaRegtestClient {
         ];
         args.extend(CHAIN_ARGS.iter().map(ToString::to_string));
 
-        let node = Daemon::start(&exe, workdir.join("sequentia"), &rpc, &args)?;
+        let mut node = Daemon::start(exe, workdir.join("sequentia"), rpc, &args)?;
 
-        let identity = ElementsRpc::new(
+        let network = ElementsRpc::new(
             format!("http://127.0.0.1:{}", node.rpc_port),
             Auth::UserPass(rpc.user.clone(), rpc.password.clone()),
-        )?
-        .chain_identity()?;
-        let network = SimplicityNetwork::SequentiaRegtest {
-            genesis_hash: identity.0,
-            policy_asset: identity.1,
-        };
+        )
+        .and_then(|rpc| rpc.sequentia_network());
 
-        node.call("createwallet", &[WALLET.into()])?;
-
-        Ok(Self {
-            node,
-            parent,
-            workdir,
-            network,
-            rpc_user: rpc.user,
-            rpc_password: rpc.password,
-            stopped: false,
-        })
+        match network {
+            Ok(network) => Ok((node, network)),
+            Err(e) => {
+                node.stop();
+                Err(e.into())
+            }
+        }
     }
 
     fn workdir() -> Result<PathBuf, RegtestError> {

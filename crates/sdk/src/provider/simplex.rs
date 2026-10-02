@@ -25,7 +25,8 @@ impl SimplexProvider {
     /// Creates a new `SimplexProvider` with the given URLs, authentication, and network.
     ///
     /// # Panics
-    /// Panics if the `ElementsRpc` client fails to initialize.
+    /// Panics if `network` is not a Sequentia network, or if the `ElementsRpc` client fails to
+    /// initialize.
     #[must_use]
     pub fn new(esplora_url: String, elements_url: String, auth: Auth, network: SimplicityNetwork) -> Self {
         Self {
@@ -88,7 +89,12 @@ impl ProviderTrait for SimplexProvider {
         self.esplora.fetch_fee_estimates()
     }
 
+    fn has_fee_exchange_rates(&self) -> bool {
+        true
+    }
+
     fn fetch_fee_exchange_rate(&self, asset: AssetId) -> Result<Option<u64>, ProviderError> {
-        self.esplora.fetch_fee_exchange_rate(asset)
+        // The indexer has no exchange-rate table; the node beside it has.
+        Ok(self.elements.fee_exchange_rate(asset)?)
     }
 }

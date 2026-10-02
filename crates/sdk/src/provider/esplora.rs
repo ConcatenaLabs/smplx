@@ -66,8 +66,15 @@ struct EsploraUtxo {
 
 impl EsploraProvider {
     /// Creates a new `EsploraProvider` connected to the provided endpoint targeting the specific network.
+    ///
+    /// # Panics
+    /// Panics if `network` is not a Sequentia network ([`SimplicityNetwork::require_sequentia`]).
     #[must_use]
     pub fn new(url: String, network: SimplicityNetwork) -> Self {
+        if let Err(refused) = network.require_sequentia() {
+            panic!("{refused}");
+        }
+
         Self {
             esplora_url: url,
             network,

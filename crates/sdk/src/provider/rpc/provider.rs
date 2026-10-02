@@ -17,9 +17,6 @@ use crate::transaction::{TxReceipt, UTXO};
 use super::elements::ElementsRpc;
 use super::error::RpcError;
 
-/// The JSON-RPC error code for a method the node does not have.
-const RPC_METHOD_NOT_FOUND: i32 = -32601;
-
 /// Confirmation targets reported by [`RpcProvider::fetch_fee_estimates`].
 const FEE_TARGETS: [u32; 7] = [1, 2, 3, 6, 12, 25, 144];
 
@@ -41,8 +38,11 @@ impl RpcProvider {
     /// Connects to the node at `url`.
     ///
     /// # Errors
-    /// Returns an `RpcError` if the client cannot be created or the node does not answer.
+    /// Returns an `RpcError` if `network` is not a Sequentia network, if the client cannot be
+    /// created or the node does not answer.
     pub fn new(url: String, auth: Auth, network: SimplicityNetwork, mine_on_broadcast: bool) -> Result<Self, RpcError> {
+        network.require_sequentia()?;
+
         Ok(Self {
             rpc: ElementsRpc::new(url, auth)?,
             network,
@@ -244,33 +244,11 @@ impl ProviderTrait for RpcProvider {
         Ok(estimates)
     }
 
+    fn has_fee_exchange_rates(&self) -> bool {
+        true
+    }
+
     fn fetch_fee_exchange_rate(&self, asset: AssetId) -> Result<Option<u64>, ProviderError> {
-        // A node with no fee exchange-rate table (any upstream Elements node) does not know
-        // the call, and then has no rate to give.
-        let rates = match self.rpc.inner.call::<Value>("getfeeexchangerates", &[]) {
-            Ok(rates) => rates,
-            Err(bitcoincore_rpc::Error::JsonRpc(bitcoincore_rpc::jsonrpc::Error::Rpc(e)))
-                if e.code == RPC_METHOD_NOT_FOUND =>
-            {
-                return Ok(None);
-            }
-            Err(e) => return Err(ProviderError::Rpc(RpcError::from(e))),
-        };
-
-        // The table is keyed by asset id, or by the node's label for an asset it has one for.
-        if let Some(rate) = rates.get(asset.to_string()) {
-            return Ok(rate.as_u64());
-        }
-
-        let labels = self.call("dumpassetlabels", &[])?;
-        let label = labels
-            .as_object()
-            .and_then(|map| {
-                map.iter()
-                    .find(|(_, id)| id.as_str() == Some(asset.to_string().as_str()))
-            })
-            .map(|(label, _)| label.clone());
-
-        Ok(label.and_then(|label| rates.get(&label).and_then(Value::as_u64)))
+        Ok(self.rpc.fee_exchange_rate(asset)?)
     }
 }

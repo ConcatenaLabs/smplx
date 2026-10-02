@@ -1,0 +1,75 @@
+name: Parity
+
+# The Simplicity libraries this repository's Cargo.lock resolves, against the
+# node's. The signer costs programs and sizes their padding with
+# simplicity-lang's Rust jet table, and runs them with the C library that
+# simplicity-sys bundles; if either differs from the node's, a spend can pass
+# every local test and be refused on the chain. The gate is
+# sequentia-contracts' parity/parity_gate.py, run on this lock file against the
+# tip of the node's default branch. The compiler and both libraries must also
+# be the versions sequentia-contracts pins, so the two repositories build the
+# same programs to the same commitment roots.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  parity:
+    name: Parity gate against the node's Simplicity library
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Checkout sequentia-contracts
+        uses: actions/checkout@v6
+        with:
+          repository: ConcatenaLabs/sequentia-contracts
+          path: contracts
+          persist-credentials: false
+
+      # Only the node's src/simplicity is fetched, from the tip of its default
+      # branch, so a subtree update in the node fails this job.
+      - name: Checkout the node's Simplicity library
+        uses: actions/checkout@v6
+        with:
+          repository: ConcatenaLabs/Sequentia
+          ref: master
+          path: node
+          sparse-checkout: src/simplicity
+          sparse-checkout-cone-mode: true
+          persist-credentials: false
+
+      - name: Record the commits compared
+        run: |
+          git -C contracts log -1 --format='sequentia-contracts %H %cs'
+          git -C node log -1 --format='node %H %cs'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Fetch the locked crates
+        run: cargo fetch --locked
+
+      - name: Compare the C sources and the Rust jet table with the node's
+        run: python3 contracts/parity/parity_gate.py --node node/src/simplicity --manifest-path Cargo.toml
+
+      - name: The compiler and libraries are the versions sequentia-contracts pins
+        run: scripts/check-simplicity-pins.sh Cargo.lock contracts/Cargo.lock

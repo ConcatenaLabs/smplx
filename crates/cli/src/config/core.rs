@@ -69,26 +69,23 @@ impl Config {
     }
 
     fn validate(config: &Config) -> Result<(), ConfigError> {
-        if let Some(esplora_config) = config.test.esplora.clone() {
+        // With a node's RPC beside it, the chain is read from the node and this key is not used.
+        if let Some(esplora_config) = config.test.esplora.clone()
+            && config.test.rpc.is_none()
+        {
             Self::validate_network(&esplora_config.network)?;
-
-            if config.test.rpc.is_some() && esplora_config.network != "ElementsRegtest" {
-                return Err(ConfigError::NetworkNameUnmatched(esplora_config.network.clone()));
-            }
         }
 
         Ok(())
     }
 
-    fn validate_network(network: &String) -> Result<(), ConfigError> {
-        if network != "Liquid"
-            && network != "LiquidTestnet"
-            && network != "ElementsRegtest"
-            && network != "SequentiaTestnet"
-        {
-            return Err(ConfigError::BadNetworkName(network.clone()));
+    /// This build speaks Sequentia's transaction encoding only, so the one network an Esplora
+    /// alone can name is the Sequentia testnet.
+    fn validate_network(network: &str) -> Result<(), ConfigError> {
+        match network {
+            "SequentiaTestnet" => Ok(()),
+            "Liquid" | "LiquidTestnet" | "ElementsRegtest" => Err(ConfigError::UnsupportedNetwork(network.to_string())),
+            _ => Err(ConfigError::BadNetworkName(network.to_string())),
         }
-
-        Ok(())
     }
 }

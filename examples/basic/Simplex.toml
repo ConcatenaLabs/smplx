@@ -1,5 +1,5 @@
 # This example runs on a local Sequentia chain: `sequentiad` on PATH, or set
-# `node_bin`. Comment out the `[regtest]` table below to run on Liquid regtest.
+# `node_bin`.
 [regtest]
 chain = "sequentia"
 
@@ -14,14 +14,13 @@ chain = "sequentia"
 # some_dep = { git = "<git url>", path = "<or a relative path>" } 
 
 # [regtest]
+# chain = "sequentia"
 # mnemonic = "exist carry drive collect lend cereal occur much tiger just involve mean"
 # bitcoins = 10_000_000
 # rpc_port = 18443
-# esplora_port = 3000
 # rpc_user = "user"
 # rpc_password = "password"
-# node_bin = "<path to elementsd; default: elementsd on PATH>"
-# electrs_bin = "<path to electrs; default: electrs on PATH>"
+# node_bin = "<path to sequentiad; default: sequentiad on PATH>"
 
 # [test]
 # mnemonic = "exist carry drive collect lend cereal occur much tiger just involve mean"
@@ -30,9 +29,9 @@ chain = "sequentia"
 
 # [test.esplora]
 # url = "<esplora url>"
-# network = "<Liquid, LiquidTestnet, ElementsRegtest>"
+# network = "SequentiaTestnet"
 
 # [test.rpc]
-# url = "<rpc url>"
+# url = "<rpc url of a Sequentia node>"
 # username = "<rpc username>"
 # password = "<rpc password>"

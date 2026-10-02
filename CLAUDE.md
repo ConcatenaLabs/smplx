@@ -40,9 +40,21 @@ the [`Sequentia`](https://github.com/ConcatenaLabs/Sequentia) repository.
   bytes, and a fee set on the draft can then fall one weight unit short.
 - **Padding is fixed before signing.** A full signature hash commits to every
   input's annex, so every annex is in place before any signature that counts.
+  An input not yet signed holds `[placeholder, annex]`: the node reads an annex
+  only from a stack of two or more items (BIP 341), and the signing environment
+  is built to read it the same way (`program::bip341_annexes`).
+- **Sequentia only.** The build speaks Sequentia's transaction encoding, so every
+  entry point refuses a Liquid or Elements network, and a node is identified by
+  asking it (`getfeeexchangerates`), never from a configuration key.
+- **Contract keys are not wallet keys.** Programs and tapscript leaves are signed
+  under `m/8383h/{coin}h/0h`, the wallet's own inputs under `m/84h/{coin}h/0h`.
+- **Change is valued, not counted.** It is kept at or above the node's dust
+  threshold in the fee asset's atoms and joins the fee only below it.
 - **The compiler is pinned upstream.** `simplicityhl` is the version upstream
   pins, the same one `sequentia-contracts` pins. A different version moves
-  commitment roots, and with them addresses.
+  commitment roots, and with them addresses. The `Parity` workflow fails when
+  the compiler or either Simplicity library differs from that pin, or when the
+  libraries differ from the node's.
 
 ## Before every pull request
 

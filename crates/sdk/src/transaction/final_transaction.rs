@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use bitcoin_hashes::sha256;
 
 use simplicityhl::elements::pset::{Input, PartiallySignedTransaction};
+use simplicityhl::elements::secp256k1_zkp::Tweak;
 use simplicityhl::elements::{
     AssetId, LockTime, Sequence, TxOutSecrets,
     confidential::{AssetBlindingFactor, ValueBlindingFactor},
@@ -17,6 +18,16 @@ use super::partial_output::PartialOutput;
 
 /// Constant is defined for fee calculation on transaction sending.
 pub const WITNESS_SCALE_FACTOR: usize = 4;
+
+/// The nonce of a reissuance from an explicit token. A reissuance input's nonce marks it as a
+/// reissuance rather than a new issuance; for a confidential token it is the token's asset
+/// blinding factor, and for an explicit token the node takes any non-null value as the flag. This
+/// is the value one.
+pub const EXPLICIT_TOKEN_REISSUANCE_NONCE: [u8; 32] = {
+    let mut nonce = [0u8; 32];
+    nonce[31] = 1;
+    nonce
+};
 
 /// A structure representing the details of token issuance and related metadata.
 #[derive(Debug, Clone)]
@@ -116,11 +127,9 @@ impl FinalInput {
     /// Converts the current object into an `Input` representation, including any
     /// issuance input and partial input details.
     ///
-    /// # Panics
-    ///
-    /// This function will panic if the `issuance_input` is of type `Reissuance`
-    /// and the `partial_input.secrets` field is `None` or does not contain the necessary
-    /// confidential information. Specifically, a panic occurs when attempting to unwrap the `asset_bf` value.
+    /// A reissuance takes its nonce from the token it spends: the token's asset blinding factor
+    /// when the token is confidential and its secrets are known, else
+    /// [`EXPLICIT_TOKEN_REISSUANCE_NONCE`], the flag the node accepts for an explicit token.
     #[must_use]
     pub fn to_input(&self) -> Input {
         let mut pst_input = self.partial_input.to_input();
@@ -135,18 +144,23 @@ impl FinalInput {
             pst_input.blinded_issuance = issue.blinded_issuance;
 
             if matches!(issuance_input, IssuanceInput::Reissuance { .. }) {
-                let issuance_blinding_nonce = self
-                    .partial_input
-                    .secrets
-                    .expect("Reissuance input must be confidential")
-                    .asset_bf
-                    .into_inner();
-
-                pst_input.issuance_blinding_nonce = Some(issuance_blinding_nonce);
+                pst_input.issuance_blinding_nonce = Some(self.reissuance_nonce());
             }
         }
 
         pst_input
+    }
+
+    /// The nonce a reissuance from this input carries: see [`Self::to_input`].
+    fn reissuance_nonce(&self) -> Tweak {
+        let explicit = self.partial_input.witness_utxo.asset.is_explicit();
+
+        match self.partial_input.secrets {
+            Some(secrets) if !explicit && secrets.asset_bf != AssetBlindingFactor::zero() => {
+                secrets.asset_bf.into_inner()
+            }
+            _ => Tweak::from_inner(EXPLICIT_TOKEN_REISSUANCE_NONCE).expect("one is below the curve order"),
+        }
     }
 }
 
@@ -237,7 +251,7 @@ impl FinalTransaction {
 
     /// Adds an input spent through a tapscript leaf of a taproot tree.
     ///
-    /// The signer fills each `TapscriptWitness::Signature` item with a signature by the key at the
+    /// The signer fills each `TapscriptWitness::Signature` item with a signature by the contract key at the
     /// input's derivation path, then appends the leaf script and its control block.
     pub fn add_tapscript_input(&mut self, partial_input: PartialInput, tapscript_input: TapscriptInput) {
         self.push_new_input(FinalInput::new(partial_input, RequiredSignature::None).with_tapscript(tapscript_input));
@@ -474,6 +488,26 @@ impl FinalTransaction {
         moved
     }
 
+    /// The assets a signer may choose to pay this transaction's fee in when none is named: those
+    /// it moves ([`Self::moved_assets`]) less every reissuance token an issuance or reissuance of
+    /// this transaction names. A token stands for the right to mint, not for value, and the asset
+    /// a transaction creates is left out already.
+    ///
+    /// # Panics
+    /// Function will panic if an input's asset is confidential and was not unblinded.
+    #[must_use]
+    pub fn fee_asset_candidates(&self) -> std::collections::BTreeSet<AssetId> {
+        let mut candidates = self.moved_assets();
+
+        for input in &self.inputs {
+            if let Some(details) = input.get_issuance_details() {
+                candidates.remove(&details.inflation_asset_id);
+            }
+        }
+
+        candidates
+    }
+
     /// Checks if the transaction is balanced, meaning all inputs - all outputs = 0 for every asset.
     ///
     /// Issued and reissued amounts are credited to the input that declares them, so a newly created
@@ -531,24 +565,28 @@ impl FinalTransaction {
         transfers.values().all(|&value| value == 0)
     }
 
-    /// Computes the transaction fee based on the provided weight and fee rate.
+    /// Computes the transaction fee based on the provided weight and fee rate, as the node does.
     ///
-    /// Overall, the function calculates the virtual size (vsize) of the transaction as:
-    /// `weight / WITNESS_SCALE_FACTOR`, rounded up to the nearest whole number.
-    /// Then, the fee is computed as `(vsize * fee_rate / 1000.0)`, also rounded up.
+    /// The virtual size is `weight / WITNESS_SCALE_FACTOR`, rounded up, and the fee
+    /// `ceil(fee_rate × vsize / 1000)`, worked in integers so that it is never below what the node
+    /// asks (`CFeeRate::GetFee`). The node's fee rates are whole units per 1,000 vbytes; a
+    /// fractional `fee_rate` is rounded up to the next whole unit, and a negative or non-finite
+    /// one counts as zero.
     ///
     /// # Returns
-    /// The transaction fee in satoshis, rounded up to the nearest whole number.
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_precision_loss,
-        clippy::cast_sign_loss
-    )]
+    /// The fee in the fee rate's unit.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     #[must_use]
     pub fn calculate_fee(&self, weight: usize, fee_rate: f32) -> u64 {
-        let vsize = weight.div_ceil(WITNESS_SCALE_FACTOR);
+        let vsize = u128::try_from(weight.div_ceil(WITNESS_SCALE_FACTOR)).unwrap_or(u128::MAX);
+        // Every f32 at or above 2^24 is a whole number, and one below converts exactly.
+        let per_kvb: u128 = if fee_rate.is_finite() && fee_rate > 0.0 {
+            u128::from(fee_rate.ceil() as u64)
+        } else {
+            0
+        };
 
-        (vsize as f32 * fee_rate / 1000.0).ceil() as u64
+        u64::try_from(per_kvb.saturating_mul(vsize).div_ceil(1_000)).unwrap_or(u64::MAX)
     }
 
     /// Extracts a partially signed transaction (PST) and a mapping of input secrets from the current state.
@@ -898,7 +936,11 @@ mod tests {
         let entropy = [0x42u8; 32];
         let issuance_amount = 1_000_000u64;
 
-        let conf_utxo = confidential_utxo(0x02, 0, policy, 1000);
+        // A confidential token's nonce is its asset blinding factor, which is never zero: a null
+        // nonce marks a new issuance, not a reissuance.
+        let abf = AssetBlindingFactor::from_slice(&[0x07; 32]).unwrap();
+        let mut conf_utxo = confidential_utxo(0x02, 0, policy, 1000);
+        conf_utxo.secrets = Some(TxOutSecrets::new(policy, abf, 1000, ValueBlindingFactor::zero()));
         let partial_input = PartialInput::new(conf_utxo);
         let reissuance_input = IssuanceInput::new_reissuance(issuance_amount, entropy);
         let partial_output = PartialOutput::new(Script::new(), 1000, policy);
@@ -919,10 +961,7 @@ mod tests {
         expected_pst.add_input(expected_input);
         expected_pst.add_output(partial_output.to_output());
 
-        let expected_secrets = HashMap::from([(
-            0,
-            TxOutSecrets::new(policy, AssetBlindingFactor::zero(), 1000, ValueBlindingFactor::zero()),
-        )]);
+        let expected_secrets = HashMap::from([(0, TxOutSecrets::new(policy, abf, 1000, ValueBlindingFactor::zero()))]);
 
         let (pst, secrets) = ft.extract_pst();
 
@@ -1117,6 +1156,106 @@ mod tests {
             reissuance.moved_assets().into_iter().collect::<Vec<_>>(),
             vec![details.inflation_asset_id]
         );
+
+        // Neither the token nor the asset is a fee asset the signer may choose.
+        assert!(reissuance.fee_asset_candidates().is_empty());
+        assert_eq!(
+            issuance.fee_asset_candidates().into_iter().collect::<Vec<_>>(),
+            vec![policy]
+        );
+
+        // Beside a coin of another asset, that asset is the one candidate.
+        reissuance.add_input(
+            PartialInput::new(explicit_utxo(0x03, 0, 5_000, policy)),
+            RequiredSignature::None,
+        );
+        reissuance.add_output(PartialOutput::new(Script::new(), 5_000, policy));
+        assert_eq!(
+            reissuance.fee_asset_candidates().into_iter().collect::<Vec<_>>(),
+            vec![policy]
+        );
+    }
+
+    /// R3 finding 4: a reissuance from an explicit token, Sequentia's default, panicked; with
+    /// zero secrets it wrote a null nonce, which the node reads as a new issuance.
+    #[test]
+    fn a_reissuance_from_an_explicit_token_carries_a_non_null_nonce() {
+        use simplicityhl::elements::secp256k1_zkp::ZERO_TWEAK;
+
+        let token = dummy_asset_id(0xBB);
+        let flag = Tweak::from_inner(EXPLICIT_TOKEN_REISSUANCE_NONCE).unwrap();
+        let reissue = |input: PartialInput| {
+            let mut ft = FinalTransaction::new();
+            ft.add_issuance_input(
+                input,
+                IssuanceInput::new_reissuance(500, [0x42; 32]),
+                RequiredSignature::None,
+            );
+            ft.extract_pst().0.inputs()[0].issuance_blinding_nonce
+        };
+
+        // An explicit token, with no secrets or with zero ones.
+        assert_eq!(reissue(PartialInput::new(explicit_utxo(0x01, 0, 1, token))), Some(flag));
+        let mut zero = PartialInput::new(explicit_utxo(0x01, 0, 1, token));
+        zero.secrets = Some(TxOutSecrets::new(
+            token,
+            AssetBlindingFactor::zero(),
+            1,
+            ValueBlindingFactor::zero(),
+        ));
+        assert_eq!(reissue(zero), Some(flag));
+        assert_ne!(flag, ZERO_TWEAK);
+
+        // A confidential token: its asset blinding factor.
+        let abf = AssetBlindingFactor::from_slice(&[0x07; 32]).unwrap();
+        let mut confidential = PartialInput::new(confidential_utxo(0x01, 0, token, 1));
+        confidential.secrets = Some(TxOutSecrets::new(token, abf, 1, ValueBlindingFactor::zero()));
+        confidential.witness_utxo.asset = simplicityhl::elements::confidential::Asset::Confidential(
+            simplicityhl::elements::secp256k1_zkp::Generator::new_blinded(
+                &simplicityhl::elements::secp256k1_zkp::Secp256k1::new(),
+                token.into_tag(),
+                abf.into_inner(),
+            ),
+        );
+        assert_eq!(reissue(confidential), Some(abf.into_inner()));
+    }
+
+    /// The node's fee is `ceil(rate × vsize / 1000)`. Worked in f32, the fee came out one unit
+    /// short at these sizes (the cases R3's `f32_fee_search.py` found), and the node refused it.
+    #[test]
+    fn the_fee_is_the_nodes_to_the_unit() {
+        let ft = FinalTransaction::new();
+
+        for (rate, vsize, node) in [
+            (1_001u32, 17_001usize, 17_019u64),
+            (1_001, 18_001, 18_020),
+            (12_345, 11_229, 138_623),
+            (12_345, 11_629, 143_561),
+            (100, 250, 25),
+            (100, 251, 26),
+            (1, 1, 1),
+        ] {
+            #[allow(clippy::cast_precision_loss)]
+            let rate = rate as f32;
+            assert_eq!(
+                ft.calculate_fee(vsize * WITNESS_SCALE_FACTOR, rate),
+                node,
+                "{rate} × {vsize}"
+            );
+            // A weight that is not a multiple of four rounds its vsize up.
+            assert_eq!(
+                ft.calculate_fee(vsize * WITNESS_SCALE_FACTOR - 3, rate),
+                node,
+                "{rate} × {vsize} - 3 WU"
+            );
+        }
+
+        assert_eq!(ft.calculate_fee(1_000, 0.0), 0);
+        assert_eq!(ft.calculate_fee(1_000, -5.0), 0);
+        assert_eq!(ft.calculate_fee(1_000, f32::NAN), 0);
+        // A fractional rate is rounded up, never down.
+        assert_eq!(ft.calculate_fee(4_000, 100.5), 101);
+        assert_eq!(ft.calculate_fee(usize::MAX, f32::MAX), u64::MAX);
     }
 
     /// Sequentia's `CAssetIssuance` carries one byte more than Elements': the

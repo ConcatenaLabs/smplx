@@ -82,7 +82,8 @@ pub enum SignerError {
     /// Error indicating that nothing names the asset a transaction's fee is paid in.
     ///
     /// Raised on a network with no fixed fee asset when the signer has no fee asset set and the
-    /// transaction moves no asset, or more than one. The message lists the assets it moves.
+    /// transaction moves no asset, or more than one, leaving out reissuance tokens and the assets
+    /// it creates, which are never chosen. The message lists the assets it moves.
     #[error("Nothing names the fee asset: set one with `with_fee_asset` (the transaction moves: [{0}])")]
     FeeAssetUnset(String),
 
@@ -94,6 +95,37 @@ pub enum SignerError {
     /// exchange rate for it is known.
     #[error("Fees cannot be paid in asset {0}: the network does not accept it, or no exchange rate for it is known")]
     FeeAssetNotAccepted(simplicityhl::elements::AssetId),
+
+    /// Error indicating that the provider reads no fee exchange rates and none was set.
+    #[error(
+        "No exchange rate for fees in asset {0}: this provider reads none (an Esplora indexer has no rate table). \
+         Read rates over a Sequentia node's RPC with `RpcProvider`, or set one with `with_fee_exchange_rate`"
+    )]
+    NoFeeExchangeRateSource(simplicityhl::elements::AssetId),
+
+    /// Error indicating that an exchange rate set with `with_fee_exchange_rate` is older than its
+    /// lifetime, and is refused rather than trusted.
+    #[error(
+        "The exchange rate set for fees in asset {asset} is {age_secs} s old, past its lifetime of {lifetime_secs} s; \
+         set it again or read it from the node"
+    )]
+    FeeExchangeRateExpired {
+        /// The fee asset.
+        asset: simplicityhl::elements::AssetId,
+        /// How long ago the rate was set, in seconds.
+        age_secs: u64,
+        /// How long it was valid for, in seconds.
+        lifetime_secs: u64,
+    },
+
+    /// Error indicating a signature by a contract key over a message derived by a closure, for a
+    /// program that does not declare such signatures.
+    #[error(
+        "Input {0} asks for a signature over a custom message, which its program does not declare \
+         (`Program::with_custom_sig_message`): a contract key signs the transaction's own signature hash, \
+         or a tagged hash of it, unless the program says otherwise"
+    )]
+    CustomSigMessageUndeclared(usize),
 
     /// Error indicating an invalid upstream `secp256k1` secret key.
     #[error("Invalid secret key")]

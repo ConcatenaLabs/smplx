@@ -25,7 +25,9 @@ pub enum SigMessage {
     Sighash,
     /// Sign the BIP-340 tagged hash `sha256(sha256(tag) || sha256(tag) || sighash_all)`.
     Tagged(String),
-    /// Sign whatever the closure derives from `sighash_all`.
+    /// Sign whatever the closure derives from `sighash_all`. The signer signs it with a contract
+    /// key only for a program that declares such messages
+    /// (`crate::program::Program::with_custom_sig_message`).
     Custom(SigMessageFn),
 }
 
@@ -123,9 +125,11 @@ pub struct PartialInput {
     /// Optional blinding secrets mapping values and asset states into confidential outputs.
     /// Note: if UTXO is confidential, `secrets` are `Some`.
     pub secrets: Option<TxOutSecrets>,
-    /// Derivation path of the key that can spend this input, relative to the account path.
+    /// Derivation path of the key that can spend this input, relative to the account its kind
+    /// is signed from: the wallet account `m/84h/{coin}h/0h` for a wallet (ECDSA) input, the
+    /// contract account `m/8383h/{coin}h/0h` for a Simplicity program or a tapscript leaf.
     ///
-    /// `None` means the signer's default path. A wallet whose UTXOs sit across many
+    /// `None` means the signer's default path, `0/0`. A wallet whose UTXOs sit across many
     /// derivation indices must set this per input, or the signer will sign with the wrong key.
     pub derivation_path: Option<DerivationPath>,
 }
@@ -144,8 +148,8 @@ pub struct ProgramInput {
 pub enum TapscriptWitness {
     /// Bytes pushed as they are.
     Bytes(Vec<u8>),
-    /// A BIP 341 signature (`SIGHASH_DEFAULT`, 64 bytes) by the key at the input's derivation path
-    /// over the transaction, committing to this leaf.
+    /// A BIP 341 signature (`SIGHASH_DEFAULT`, 64 bytes) by the contract key at the input's
+    /// derivation path over the transaction, committing to this leaf.
     Signature,
 }
 

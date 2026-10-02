@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use simplicityhl::Value;
 use simplicityhl::WitnessValues;
@@ -34,7 +35,9 @@ use elements_miniscript::{
     slip77::MasterBlindingKey,
 };
 
-use crate::constants::{FEE_EXCHANGE_RATE_SCALE, MIN_FEE};
+use crate::constants::{
+    CONTRACT_KEY_PURPOSE, DUST_RELAY_FEE, FEE_EXCHANGE_RATE_OVERRIDE_LIFETIME, FEE_EXCHANGE_RATE_SCALE,
+};
 use crate::program::logger::ProgramLogger;
 use crate::program::{ProgramTrait, SpendBudget};
 #[cfg(feature = "provider")]
@@ -110,7 +113,30 @@ pub struct Signer {
     network: SimplicityNetwork,
     secp: Secp256k1<All>,
     fee_asset: Option<AssetId>,
-    fee_exchange_rates: HashMap<AssetId, u64>,
+    fee_exchange_rates: HashMap<AssetId, RateOverride>,
+    dust_relay_fee: u64,
+}
+
+/// An exchange rate set by hand, and how long it is trusted.
+#[derive(Debug, Clone, Copy)]
+struct RateOverride {
+    rate: u64,
+    // `None` where the SDK has no clock (a browser), and the rate cannot be aged.
+    set_at: Option<Instant>,
+    lifetime: Duration,
+}
+
+/// Now, where the standard library has a clock. In a browser (`wasm32-unknown-unknown`)
+/// `Instant::now` panics, so there is none.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+#[allow(clippy::unnecessary_wraps)]
+fn clock_now() -> Option<Instant> {
+    Some(Instant::now())
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn clock_now() -> Option<Instant> {
+    None
 }
 
 /// The asset a transaction's fee is paid in, and the rate at which the network values it.
@@ -134,6 +160,42 @@ impl FeeAsset {
             .div_ceil(u128::from(self.exchange_rate))
             .min(u128::from(u64::MAX)) as u64
     }
+
+    /// The smallest explicit output of this asset to `script_pubkey` that the node relays, in the
+    /// asset's own atoms, at a dust relay fee of `dust_relay_fee` reference units per 1,000
+    /// vbytes.
+    ///
+    /// The node's rule (`GetDustThreshold`): an output is dust when it is worth less than spending
+    /// it would cost, `ceil(dust_relay_fee × size / 1000)` reference units, where `size` is the
+    /// output's serialized size plus 67 bytes for a witness program (a P2WPKH input's share) or
+    /// 148 for any other script; that value is converted into the asset at its exchange rate,
+    /// rounding up. So the threshold is valued, not counted: 14 atoms of an asset at par for a
+    /// P2WPKH output, and one atom of an asset worth a thousand reference units an atom.
+    #[must_use]
+    pub fn dust_threshold(&self, script_pubkey: &Script, dust_relay_fee: u64) -> u64 {
+        let output = TxOut {
+            asset: simplicityhl::elements::confidential::Asset::Explicit(self.asset),
+            value: simplicityhl::elements::confidential::Value::Explicit(0),
+            nonce: simplicityhl::elements::confidential::Nonce::Null,
+            script_pubkey: script_pubkey.clone(),
+            witness: simplicityhl::elements::TxOutWitness::default(),
+        };
+        let spend = if script_pubkey.is_witness_program() {
+            32 + 4 + 1 + 107 / 4 + 4
+        } else {
+            32 + 4 + 1 + 107 + 4
+        };
+        let size =
+            u128::try_from(simplicityhl::elements::encode::serialize(&output).len() + spend).unwrap_or(u128::MAX);
+        let mut reference = (u128::from(dust_relay_fee) * size).div_ceil(1_000);
+
+        // As the node's `CFeeRate::GetFee`: a positive rate never values a cost at nothing.
+        if reference == 0 && dust_relay_fee > 0 {
+            reference = 1;
+        }
+
+        self.atoms(u64::try_from(reference).unwrap_or(u64::MAX))
+    }
 }
 
 impl SignerTrait for Signer {
@@ -146,11 +208,17 @@ impl SignerTrait for Signer {
         derivation_path: Option<&DerivationPath>,
         message: &SigMessage,
     ) -> Result<schnorr::Signature, SignerError> {
+        // A contract key signs the transaction's signature hash, or a tagged hash of it. A message
+        // a closure derives could be anything, so it is signed only for a program that says so.
+        if matches!(message, SigMessage::Custom(_)) && !program.declares_custom_sig_message() {
+            return Err(SignerError::CustomSigMessageUndeclared(input_index));
+        }
+
         let env = program.get_env(pst, input_index, network)?;
         let sighash = env.c_tx_env().sighash_all().to_byte_array();
         let msg = Message::from_digest(message.digest(sighash));
 
-        let private_key = self.get_private_key_at(derivation_path);
+        let private_key = self.get_contract_private_key_at(derivation_path);
         let keypair = Keypair::from_secret_key(&self.secp, &private_key.inner);
 
         Ok(self.secp.sign_schnorr(&msg, &keypair))
@@ -182,7 +250,7 @@ impl SignerTrait for Signer {
         )?;
         let msg = Message::from_digest(sighash.to_byte_array());
 
-        let private_key = self.get_private_key_at(derivation_path);
+        let private_key = self.get_contract_private_key_at(derivation_path);
         let keypair = Keypair::from_secret_key(&self.secp, &private_key.inner);
 
         Ok(self.secp.sign_schnorr(&msg, &keypair))
@@ -256,7 +324,8 @@ impl Signer {
     /// Creates a new `Signer` instance seeded from the provided mnemonic and paired with the specified provider.
     ///
     /// # Panics
-    /// Panics if the mnemonic fails to parse, or if deriving the master private key fails.
+    /// Panics if the provider's network is not a Sequentia network, if the mnemonic fails to
+    /// parse, or if deriving the master private key fails.
     #[cfg(feature = "provider")]
     #[must_use]
     pub fn new(mnemonic: &str, provider: Box<dyn ProviderTrait>) -> Self {
@@ -273,9 +342,14 @@ impl Signer {
     /// This is the constructor a host with its own networking and its own key custody should use.
     ///
     /// # Panics
-    /// Panics if the mnemonic fails to parse, or if deriving the master private key fails.
+    /// Panics if `network` is not a Sequentia network ([`SimplicityNetwork::require_sequentia`]),
+    /// if the mnemonic fails to parse, or if deriving the master private key fails.
     #[must_use]
     pub fn from_mnemonic(mnemonic: &str, network: SimplicityNetwork) -> Self {
+        if let Err(refused) = network.require_sequentia() {
+            panic!("{refused}");
+        }
+
         let secp = Secp256k1::new();
         let mnemonic: Mnemonic = mnemonic
             .parse()
@@ -294,7 +368,18 @@ impl Signer {
             secp,
             fee_asset: None,
             fee_exchange_rates: HashMap::new(),
+            dust_relay_fee: DUST_RELAY_FEE,
         }
+    }
+
+    /// Takes the node's dust relay fee to be `rate` reference units per 1,000 vbytes, for a node
+    /// started with a `-dustrelayfee` other than the default [`DUST_RELAY_FEE`]. The signer keeps
+    /// change only when the node would relay it; see [`FeeAsset::dust_threshold`].
+    #[must_use]
+    pub fn with_dust_relay_fee(mut self, rate: u64) -> Self {
+        self.dust_relay_fee = rate;
+
+        self
     }
 
     /// Pays every fee this signer builds in `asset`.
@@ -309,11 +394,31 @@ impl Signer {
     }
 
     /// Values fees paid in `asset` at `rate` (atoms per [`FEE_EXCHANGE_RATE_SCALE`] units of the
-    /// fee rate's unit) instead of asking the provider. A signer with no provider needs this for
-    /// any asset a network does not value at par.
+    /// fee rate's unit) instead of asking the provider, for
+    /// [`FEE_EXCHANGE_RATE_OVERRIDE_LIFETIME`] from now. A signer with no provider that reads the
+    /// node's rates needs this for every fee asset.
+    ///
+    /// Once the lifetime has passed, a fee in `asset` is refused with
+    /// `SignerError::FeeExchangeRateExpired` until the rate is set again: a node values fees at its
+    /// own rate when the transaction reaches it, and an old rate can underpay. In a browser
+    /// (`wasm32-unknown-unknown`) the SDK has no clock, so there the rate does not age, and the
+    /// host sets it afresh before each transaction.
     #[must_use]
-    pub fn with_fee_exchange_rate(mut self, asset: AssetId, rate: u64) -> Self {
-        self.fee_exchange_rates.insert(asset, rate);
+    pub fn with_fee_exchange_rate(self, asset: AssetId, rate: u64) -> Self {
+        self.with_fee_exchange_rate_for(asset, rate, FEE_EXCHANGE_RATE_OVERRIDE_LIFETIME)
+    }
+
+    /// As [`Self::with_fee_exchange_rate`], trusted for `lifetime` from now.
+    #[must_use]
+    pub fn with_fee_exchange_rate_for(mut self, asset: AssetId, rate: u64, lifetime: Duration) -> Self {
+        self.fee_exchange_rates.insert(
+            asset,
+            RateOverride {
+                rate,
+                set_at: clock_now(),
+                lifetime,
+            },
+        );
 
         self
     }
@@ -321,8 +426,10 @@ impl Signer {
     /// Decides the asset a transaction's fee is paid in.
     ///
     /// On a network whose fees are fixed to its policy asset, that asset. Elsewhere the asset set
-    /// with [`Self::with_fee_asset`]; failing that, the one asset the transaction moves; failing
-    /// that, an error. No asset is a fallback.
+    /// with [`Self::with_fee_asset`]; failing that, the one asset the transaction moves, leaving
+    /// out reissuance tokens and the assets it creates
+    /// ([`FinalTransaction::fee_asset_candidates`]); failing that, an error. No asset is a
+    /// fallback.
     ///
     /// # Errors
     /// Returns `FeeAssetNotAccepted` for a fee asset the network cannot take, and `FeeAssetUnset`
@@ -341,23 +448,41 @@ impl Signer {
             return Ok(asset);
         }
 
-        let moved = tx.moved_assets();
+        let candidates = tx.fee_asset_candidates();
 
-        match (moved.len(), moved.first()) {
+        match (candidates.len(), candidates.first()) {
             (1, Some(asset)) => Ok(*asset),
             _ => Err(SignerError::FeeAssetUnset(
-                moved.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
+                tx.moved_assets()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
             )),
         }
     }
 
-    /// The rate at which the network values fees paid in `asset`.
+    /// The rate at which the network values fees paid in `asset`: the one set with
+    /// [`Self::with_fee_exchange_rate`] while it lasts, else the node's, read through the provider
+    /// at every call.
     ///
     /// # Errors
-    /// Returns `FeeAssetNotAccepted` when neither the signer nor its provider knows a positive rate.
+    /// Returns `FeeExchangeRateExpired` for a rate set by hand that is past its lifetime,
+    /// `NoFeeExchangeRateSource` when nothing can give a rate, and `FeeAssetNotAccepted` when the
+    /// node lists no positive rate for the asset.
     pub fn fee_exchange_rate(&self, asset: AssetId) -> Result<u64, SignerError> {
-        if let Some(rate) = self.fee_exchange_rates.get(&asset) {
-            return Self::positive_rate(asset, Some(*rate));
+        if let Some(set) = self.fee_exchange_rates.get(&asset) {
+            let age = set.set_at.map_or(Duration::ZERO, |set_at| set_at.elapsed());
+
+            if age > set.lifetime {
+                return Err(SignerError::FeeExchangeRateExpired {
+                    asset,
+                    age_secs: age.as_secs(),
+                    lifetime_secs: set.lifetime.as_secs(),
+                });
+            }
+
+            return Self::positive_rate(asset, Some(set.rate));
         }
 
         if self.network.fee_asset_is_fixed() && asset == self.network.policy_asset() {
@@ -366,10 +491,14 @@ impl Signer {
 
         #[cfg(feature = "provider")]
         if let Some(provider) = self.provider.as_deref() {
+            if !provider.has_fee_exchange_rates() {
+                return Err(SignerError::NoFeeExchangeRateSource(asset));
+            }
+
             return Self::positive_rate(asset, provider.fetch_fee_exchange_rate(asset)?);
         }
 
-        Err(SignerError::FeeAssetNotAccepted(asset))
+        Err(SignerError::NoFeeExchangeRateSource(asset))
     }
 
     fn positive_rate(asset: AssetId, rate: Option<u64>) -> Result<u64, SignerError> {
@@ -454,7 +583,8 @@ impl Signer {
         signer_utxos.sort_by_key(|utxo| std::cmp::Reverse(utxo.amount()));
 
         let mut fee_tx = tx.clone();
-        let mut curr_fee = MIN_FEE;
+        // A fee is at least one atom; each estimate that falls short says what it needs.
+        let mut curr_fee = 1u64;
         let fee_rate = self.get_provider()?.fetch_fee_rate(1)?;
 
         let try_estimate = |fee_tx: &FinalTransaction, policy_amount_delta: i64, curr_fee: &mut u64| match self
@@ -515,7 +645,7 @@ impl Signer {
         let fee_asset = self.fee_asset_quote(tx)?;
         let policy_amount_delta = tx.calculate_fee_delta_in(fee_asset.asset);
 
-        if policy_amount_delta < MIN_FEE.cast_signed() {
+        if policy_amount_delta < 1 {
             return Err(SignerError::DustAmount(policy_amount_delta));
         }
 
@@ -685,13 +815,38 @@ impl Signer {
         Ok(all_utxos)
     }
 
-    /// Derives the X-Only public key specifically used for Schnorr and Taproot structures.
+    /// The x-only public key of the signer's default contract key, the key at `0/0` under the
+    /// contract account (see [`Self::get_contract_private_key_at`]): the key a Simplicity program
+    /// or a tapscript leaf names to be spent by this signer.
     #[must_use]
     pub fn get_schnorr_public_key(&self) -> XOnlyPublicKey {
-        let private_key = self.get_private_key();
+        self.get_contract_public_key_at(None)
+    }
+
+    /// The x-only public key of the contract key at `relative` (see
+    /// [`Self::get_contract_private_key_at`]).
+    #[must_use]
+    pub fn get_contract_public_key_at(&self, relative: Option<&DerivationPath>) -> XOnlyPublicKey {
+        let private_key = self.get_contract_private_key_at(relative);
         let keypair = Keypair::from_secret_key(&self.secp, &private_key.inner);
 
         keypair.x_only_public_key().0
+    }
+
+    /// Derives a contract key: a key that signs for Simplicity programs and tapscript leaves, at
+    /// a path relative to the contract account `m/8383h/{coin}h/0h`
+    /// ([`CONTRACT_KEY_PURPOSE`]). `None` defaults to `0/0`.
+    ///
+    /// The wallet's own keys, which hold its funding and its change, sit under
+    /// `m/84h/{coin}h/0h` ([`Self::get_private_key_at`]); a contract key is never one of them.
+    ///
+    /// # Panics
+    /// Panics if the master private key or derivation path cannot be derived.
+    #[must_use]
+    pub fn get_contract_private_key_at(&self, relative: Option<&DerivationPath>) -> PrivateKey {
+        let account = self.get_contract_derivation_path().unwrap();
+
+        self.derive_relative(&account, relative)
     }
 
     /// Resolves the standard format ECDSA public key.
@@ -715,14 +870,20 @@ impl Signer {
         self.get_private_key_at(None)
     }
 
-    /// Derives the signing key at a path relative to the account path. `None` defaults to `0/0`.
+    /// Derives a wallet key, which signs the wallet's own (ECDSA) inputs, at a path relative to
+    /// the wallet account `m/84h/{coin}h/0h`. `None` defaults to `0/0`, the wallet's address.
     ///
     /// # Panics
     /// Panics if the master private key or derivation path cannot be derived.
     #[must_use]
     pub fn get_private_key_at(&self, relative: Option<&DerivationPath>) -> PrivateKey {
+        let account = self.get_derivation_path().unwrap();
+
+        self.derive_relative(&account, relative)
+    }
+
+    fn derive_relative(&self, full_path: &DerivationPath, relative: Option<&DerivationPath>) -> PrivateKey {
         let master_xprv = self.master_xpriv().unwrap();
-        let full_path = self.get_derivation_path().unwrap();
 
         let default_path;
         let relative = if let Some(path) = relative {
@@ -804,7 +965,7 @@ impl Signer {
             return Err(SignerError::ConfidentialInputWithoutBlindedOutput);
         }
 
-        let mut change_output = PartialOutput::new(change.script_pubkey, PLACEHOLDER_FEE, fee_asset.asset);
+        let mut change_output = PartialOutput::new(change.script_pubkey.clone(), PLACEHOLDER_FEE, fee_asset.asset);
 
         if let Some(blinding_key) = change.blinding_key {
             change_output = change_output.with_blinding_key(blinding_key);
@@ -817,8 +978,12 @@ impl Signer {
         // The draft weighs what the final transaction will: only amounts change between them.
         let (draft, budgets) = self.sign_tx_reporting(&fee_tx)?;
         let fee = fee_asset.atoms(fee_tx.calculate_fee(self.fee_weight(&draft), fee_rate));
+        // Change below what the node relays is not kept: it joins the fee. At or above it, it is.
+        let dust = fee_asset
+            .dust_threshold(&change.script_pubkey, self.dust_relay_fee)
+            .max(1);
 
-        if available_delta > fee && available_delta - fee >= MIN_FEE {
+        if available_delta >= fee.saturating_add(dust) {
             // We have enough funds to cover the change UTXO
             let outputs = fee_tx.outputs_mut();
 
@@ -846,7 +1011,7 @@ impl Signer {
             .any(|(index, output)| index != change_index && output.blinding_key.is_some());
 
         if fee_tx.has_confidential_input() && !blinded_without_change {
-            return Ok(Estimate::Failure(fee + MIN_FEE));
+            return Ok(Estimate::Failure(fee.saturating_add(dust)));
         }
 
         fee_tx.remove_output(change_index);
@@ -945,8 +1110,10 @@ impl Signer {
         let mut annexes: Vec<Option<Vec<u8>>> = vec![None; tx.n_inputs()];
 
         for _ in 0..3 {
+            // An input not yet signed holds `[placeholder, annex]`: BIP 341 reads an annex only
+            // from a stack of two or more items, and so does the node.
             for (input, annex) in pst.inputs_mut().iter_mut().zip(&annexes) {
-                input.final_script_witness = annex.clone().map(|annex| vec![annex]);
+                input.final_script_witness = annex.clone().map(|annex| vec![Vec::new(), annex]);
             }
 
             let mut budgets = Vec::new();
@@ -1196,6 +1363,13 @@ impl Signer {
 
         DerivationPath::from_str(&format!("m/{path}")).map_err(|e| SignerError::DerivationPath(e.to_string()))
     }
+
+    fn get_contract_derivation_path(&self) -> Result<DerivationPath, SignerError> {
+        let coin_type = if self.network.is_mainnet() { 1776 } else { 1 };
+        let path = format!("{CONTRACT_KEY_PURPOSE}h/{coin_type}h/0h");
+
+        DerivationPath::from_str(&format!("m/{path}")).map_err(|e| SignerError::DerivationPath(e.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -1205,11 +1379,14 @@ mod tests {
 
     use super::*;
 
+    /// A signer on the Sequentia testnet with an Esplora provider that is never called, valuing
+    /// the policy asset at par.
     fn create_signer() -> Signer {
-        let url = "https://blockstream.info/liquidtestnet/api".to_string();
-        let network = SimplicityNetwork::Liquid;
+        let url = "http://127.0.0.1:1/api".to_string();
+        let network = SimplicityNetwork::SequentiaTestnet;
 
         Signer::new(random_mnemonic().as_str(), Box::new(EsploraProvider::new(url, network)))
+            .with_fee_exchange_rate(network.policy_asset(), FEE_EXCHANGE_RATE_SCALE)
     }
 
     fn confidential_input(signer: &Signer, value: u64) -> PartialInput {
@@ -1311,30 +1488,104 @@ mod tests {
     }
 
     #[test]
-    fn a_fixed_fee_network_pays_in_its_policy_asset_and_refuses_another() {
-        let signer = create_signer();
-        let other = AssetId::from_slice(&[0x07; 32]).unwrap();
-        let mut ft = FinalTransaction::new();
-        ft.add_output(PartialOutput::new(Script::new(), 1, other));
+    fn the_dust_threshold_is_the_nodes_valued_in_the_fee_asset() {
+        let asset = AssetId::from_slice(&[0x07; 32]).unwrap();
+        let at = |exchange_rate| FeeAsset { asset, exchange_rate };
+        let p2wpkh = Address::p2wpkh(
+            &sequentia_signer().get_ecdsa_public_key(),
+            None,
+            SimplicityNetwork::SequentiaTestnet.address_params(),
+        )
+        .script_pubkey();
+        let legacy = Address::p2pkh(
+            &sequentia_signer().get_ecdsa_public_key(),
+            None,
+            SimplicityNetwork::SequentiaTestnet.address_params(),
+        )
+        .script_pubkey();
 
-        assert_eq!(signer.fee_asset_for(&ft).unwrap(), signer.network.policy_asset());
+        // An explicit P2WPKH output is 66 bytes: 133 with its spend, 13.3 reference units at the
+        // default dust relay fee, so 14.
+        assert_eq!(at(FEE_EXCHANGE_RATE_SCALE).dust_threshold(&p2wpkh, DUST_RELAY_FEE), 14);
+        // Worth a thousand reference units an atom: one atom.
         assert_eq!(
-            signer.fee_exchange_rate(signer.network.policy_asset()).unwrap(),
-            FEE_EXCHANGE_RATE_SCALE
+            at(1_000 * FEE_EXCHANGE_RATE_SCALE).dust_threshold(&p2wpkh, DUST_RELAY_FEE),
+            1
         );
+        // Worth a hundredth: 1,400 atoms.
+        assert_eq!(
+            at(FEE_EXCHANGE_RATE_SCALE / 100).dust_threshold(&p2wpkh, DUST_RELAY_FEE),
+            1_400
+        );
+        // Not a witness program: 69 + 148 bytes, 21.7 reference units, so 22.
+        assert_eq!(at(FEE_EXCHANGE_RATE_SCALE).dust_threshold(&legacy, DUST_RELAY_FEE), 22);
+        // At Bitcoin's 3,000 per 1,000 vbytes: 399.
+        assert_eq!(at(FEE_EXCHANGE_RATE_SCALE).dust_threshold(&p2wpkh, 3_000), 399);
+    }
 
-        let signer = signer.with_fee_asset(other);
-        assert!(matches!(
-            signer.fee_asset_for(&ft),
-            Err(SignerError::FeeAssetNotAccepted(asset)) if asset == other
-        ));
+    #[test]
+    fn change_below_the_threshold_joins_the_fee_and_only_below_it() {
+        // The reviewer's probe B: an asset worth a thousand reference units an atom, a coin of
+        // 1,000 and a payment of 990. The fee is one atom, the threshold one atom, so nine come
+        // back as change.
+        let gold = AssetId::from_slice(&[0x07; 32]).unwrap();
+        let signer = sequentia_signer().with_fee_exchange_rate(gold, 1_000 * FEE_EXCHANGE_RATE_SCALE);
+        let ft = gold_spend(&signer, gold, &[1_000], 990);
+        let (tx, fee) = signer.finalize_strict(&ft, 100.0).unwrap();
+        let amounts: Vec<u64> = tx.output.iter().map(|o| o.value.explicit().unwrap()).collect();
+
+        assert_eq!(fee, 1);
+        assert_eq!(amounts, vec![990, 9, 1]);
+
+        // At par the threshold is 14 atoms: a surplus of 13 joins the fee, 14 is kept.
+        let signer = sequentia_signer().with_fee_exchange_rate(gold, FEE_EXCHANGE_RATE_SCALE);
+        let with_change = signer
+            .estimate_spend(&gold_spend(&signer, gold, &[100_000], 50_000), 100.0)
+            .unwrap();
+        for (surplus, kept) in [(12, false), (13, false), (14, true), (15, true)] {
+            let ft = gold_spend(&signer, gold, &[50_000 + with_change.fee + surplus], 50_000);
+            let estimate = signer.estimate_spend(&ft, 100.0).unwrap();
+
+            assert_eq!(estimate.change, kept, "surplus {surplus}");
+            if kept {
+                assert_eq!(estimate.fee, with_change.fee);
+            } else {
+                assert_eq!(estimate.fee, with_change.fee + surplus);
+            }
+        }
+
+        // A node with another dust relay fee: at 3,000 the threshold at par is 399 atoms.
+        let strict = sequentia_signer()
+            .with_fee_exchange_rate(gold, FEE_EXCHANGE_RATE_SCALE)
+            .with_dust_relay_fee(3_000);
+        let ft = gold_spend(&strict, gold, &[50_000 + with_change.fee + 398], 50_000);
+        assert!(!strict.estimate_spend(&ft, 100.0).unwrap().change);
+        let ft = gold_spend(&strict, gold, &[50_000 + with_change.fee + 399], 50_000);
+        assert!(strict.estimate_spend(&ft, 100.0).unwrap().change);
+    }
+
+    #[test]
+    #[should_panic(expected = "This build of Simplex speaks Sequentia's transaction encoding only")]
+    fn a_liquid_signer_is_refused() {
+        let _ = Signer::from_mnemonic(random_mnemonic().as_str(), SimplicityNetwork::Liquid);
+    }
+
+    #[test]
+    #[should_panic(expected = "is not a Sequentia network")]
+    fn an_elements_signer_is_refused() {
+        let _ = Signer::from_mnemonic(random_mnemonic().as_str(), SimplicityNetwork::default_regtest());
+    }
+
+    #[test]
+    #[should_panic(expected = "is not a Sequentia network")]
+    fn an_elements_provider_is_refused() {
+        let _ = EsploraProvider::new("http://127.0.0.1:1/api".into(), SimplicityNetwork::LiquidTestnet);
     }
 
     #[test]
     fn a_configured_exchange_rate_is_used_and_a_zero_one_refused() {
         let asset = AssetId::from_slice(&[0x07; 32]).unwrap();
-        let signer = Signer::from_mnemonic(random_mnemonic().as_str(), SimplicityNetwork::Liquid)
-            .with_fee_exchange_rate(asset, 42);
+        let signer = sequentia_signer().with_fee_exchange_rate(asset, 42);
 
         assert_eq!(signer.fee_exchange_rate(asset).unwrap(), 42);
 
@@ -1343,6 +1594,129 @@ mod tests {
             signer.fee_exchange_rate(asset),
             Err(SignerError::FeeAssetNotAccepted(_))
         ));
+    }
+
+    #[test]
+    fn a_configured_exchange_rate_expires() {
+        let asset = AssetId::from_slice(&[0x07; 32]).unwrap();
+        let signer = sequentia_signer().with_fee_exchange_rate_for(asset, 42, Duration::from_millis(50));
+
+        assert_eq!(signer.fee_exchange_rate(asset).unwrap(), 42);
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(matches!(
+            signer.fee_exchange_rate(asset),
+            Err(SignerError::FeeExchangeRateExpired { asset: a, lifetime_secs: 0, .. }) if a == asset
+        ));
+
+        // Refused, not quietly replaced: a spend paying in the asset is refused with it.
+        let ft = gold_spend(&signer, asset, &[100_000], 50_000);
+        assert!(matches!(
+            signer.finalize_strict(&ft, 100.0),
+            Err(SignerError::FeeExchangeRateExpired { .. })
+        ));
+
+        // Set again, it is trusted again; the default lifetime is ten minutes.
+        let signer = signer.with_fee_exchange_rate(asset, 42);
+        assert_eq!(signer.fee_exchange_rate(asset).unwrap(), 42);
+        assert_eq!(FEE_EXCHANGE_RATE_OVERRIDE_LIFETIME, Duration::from_mins(10));
+    }
+
+    #[test]
+    fn an_esplora_provider_is_no_rate_source() {
+        let asset = AssetId::from_slice(&[0x07; 32]).unwrap();
+        let signer = Signer::new(
+            random_mnemonic().as_str(),
+            Box::new(EsploraProvider::new(
+                "http://127.0.0.1:1/api".into(),
+                SimplicityNetwork::SequentiaTestnet,
+            )),
+        );
+
+        assert!(matches!(
+            signer.fee_exchange_rate(asset),
+            Err(SignerError::NoFeeExchangeRateSource(a)) if a == asset
+        ));
+    }
+
+    #[test]
+    fn contract_keys_are_not_wallet_keys() {
+        let signer = sequentia_signer();
+        let secp = Secp256k1::new();
+        let wallet = |path: &str| {
+            let key = signer.get_private_key_at(Some(&DerivationPath::from_str(path).unwrap()));
+            Keypair::from_secret_key(&secp, &key.inner).x_only_public_key().0
+        };
+
+        // The default contract key, at 0/0 under m/8383h/1h/0h, is none of the wallet's funding
+        // or change keys, and none of the paths the wallet kit uses beside them.
+        let contract = signer.get_schnorr_public_key();
+        assert_eq!(contract, signer.get_contract_public_key_at(None));
+        for path in ["0/0", "0/1", "1/0", "1/1", "2/0", "3/0", "4/0"] {
+            assert_ne!(contract, wallet(path), "{path}");
+        }
+        assert_ne!(contract, signer.get_ecdsa_public_key().inner.x_only_public_key().0);
+
+        let expected = {
+            let seed = signer.mnemonic.to_seed("");
+            let master = Xpriv::new_master(SimplicityNetwork::SequentiaTestnet, &seed).unwrap();
+            let path = DerivationPath::from_str("m/8383h/1h/0h/0/0").unwrap();
+            let key = master.derive_priv(&secp, &path).unwrap().private_key;
+            Keypair::from_secret_key(&secp, &key).x_only_public_key().0
+        };
+        assert_eq!(contract, expected);
+
+        // A relative path moves within the contract account.
+        let other = signer.get_contract_public_key_at(Some(&DerivationPath::from_str("0/7").unwrap()));
+        assert_ne!(other, contract);
+        assert_ne!(other, wallet("0/7"));
+    }
+
+    #[test]
+    fn a_custom_message_is_signed_only_for_a_program_that_declares_it() {
+        use crate::program::{ArgumentsTrait, Program};
+        use simplicityhl::Arguments;
+        use simplicityhl::elements::pset::Input;
+
+        #[derive(Clone)]
+        struct NoArguments;
+        impl ArgumentsTrait for NoArguments {
+            fn build_arguments(&self) -> Arguments {
+                Arguments::default()
+            }
+        }
+
+        let signer = sequentia_signer();
+        let network = SimplicityNetwork::SequentiaTestnet;
+        let program = Program::new("fn main() { assert!(jet::eq_8(1, 1)); }", &NoArguments);
+        let mut pst = PartiallySignedTransaction::new_v2();
+        pst.add_input(Input {
+            witness_utxo: Some(TxOut::new_fee(1_000, network.policy_asset())),
+            ..Default::default()
+        });
+        pst.inputs_mut()[0].witness_utxo.as_mut().unwrap().script_pubkey = program.get_script_pubkey(&network);
+        let custom = SigMessage::Custom(Arc::new(|_| [0x11; 32]));
+
+        assert!(matches!(
+            signer.sign_program(&pst, &program, 0, &network, None, &custom),
+            Err(SignerError::CustomSigMessageUndeclared(0))
+        ));
+        assert!(
+            signer
+                .sign_program(&pst, &program, 0, &network, None, &SigMessage::Sighash)
+                .is_ok()
+        );
+
+        let declared = program.with_custom_sig_message();
+        let signature = signer
+            .sign_program(&pst, &declared, 0, &network, None, &custom)
+            .unwrap();
+        let message = Message::from_digest([0x11; 32]);
+        assert!(
+            signer
+                .secp
+                .verify_schnorr(&signature, &message, &signer.get_schnorr_public_key())
+                .is_ok()
+        );
     }
 
     fn sequentia_signer() -> Signer {
@@ -1384,7 +1758,7 @@ mod tests {
         // With no provider and no configured rate, even the policy asset has no rate.
         assert!(matches!(
             signer.fee_exchange_rate(SimplicityNetwork::SequentiaTestnet.policy_asset()),
-            Err(SignerError::FeeAssetNotAccepted(_))
+            Err(SignerError::NoFeeExchangeRateSource(_))
         ));
     }
 
@@ -1501,11 +1875,17 @@ mod tests {
         let gold = AssetId::from_slice(&[0x07; 32]).unwrap();
         let signer = sequentia_signer().with_fee_exchange_rate(gold, FEE_EXCHANGE_RATE_SCALE);
         // With change, the fee is about one atom per vbyte; leave less than that plus the
-        // smallest change.
+        // smallest change the node relays.
         let with_change = signer
             .estimate_spend(&gold_spend(&signer, gold, &[100_000], 50_000), 1_000.0)
             .unwrap();
-        let input = 50_000 + with_change.fee + MIN_FEE - 1;
+        let dust = FeeAsset {
+            asset: gold,
+            exchange_rate: FEE_EXCHANGE_RATE_SCALE,
+        }
+        .dust_threshold(&signer.get_address().script_pubkey(), DUST_RELAY_FEE);
+        assert_eq!(dust, 14);
+        let input = 50_000 + with_change.fee + dust - 1;
         let ft = gold_spend(&signer, gold, &[input], 50_000);
 
         let estimate = signer.estimate_spend(&ft, 1_000.0).unwrap();
