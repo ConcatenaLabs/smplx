@@ -47,6 +47,11 @@ pub enum ProgramError {
     #[error("Input index exceeds u32 maximum: {0}")]
     InputIndexOverflow(#[from] std::num::TryFromIntError),
 
+    /// Error indicating the program's leaf is not in the tree it was placed in: it was changed
+    /// (rebuilt in another mode, say) after the tree was fixed.
+    #[error("The program's leaf is not in its tree; it changed after the tree was fixed")]
+    NotInTree,
+
     /// Error thrown if the compiled program fails to export or generate valid ABI metadata.
     #[error("Failed to obtain program witness types: {0}")]
     ProgramGenAbiMeta(String),

@@ -119,6 +119,15 @@ pub enum SignerError {
     #[error("Failed to construct a wpkh address: {0}")]
     WpkhAddressConstruction(#[from] elements_miniscript::Error),
 
+    /// Error indicating an input of the transaction lacks the output it spends, which a
+    /// taproot signature commits to.
+    #[error("Input {0} does not carry the output it spends")]
+    MissingSpentOutput(usize),
+
+    /// Error thrown when a taproot signature hash cannot be computed.
+    #[error("Failed to compute a taproot signature hash: {0}")]
+    TaprootSighash(#[from] simplicityhl::elements::sighash::Error),
+
     /// Error indicating an expected witness field could not be found.
     #[error("Missing such witness field: {0}")]
     WtnsFieldNotFound(String),
