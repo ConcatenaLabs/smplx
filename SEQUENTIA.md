@@ -28,7 +28,7 @@ networks, the regtest chain).
 | Fees | Fees are payable in any asset the node accepts. The signer pays in the asset set with `Signer::with_fee_asset`, or else in the one asset a transaction moves; when a transaction moves several assets and none is set, it refuses. A reissuance token and an asset the transaction creates are never chosen. No asset, the policy asset included, is a fallback. The fee is computed in the node's reference unit, `ceil(rate × vsize / 1000)` in integers as the node computes it, and converted at the node's exchange rate for that asset, rounding up. Fees are charged on full weight, as a Sequentia node does by default |
 | Exchange rates | The signer reads the node's rate at every quote through a provider that has the table: `RpcProvider`, or `SimplexProvider` through its node. On the testnet that means a Sequentia node's RPC; an Esplora indexer has no rate table, and a signer with only an `EsploraProvider` refuses fees with `SignerError::NoFeeExchangeRateSource`. `Signer::with_fee_exchange_rate` sets a rate by hand for ten minutes (`FEE_EXCHANGE_RATE_OVERRIDE_LIFETIME`; `with_fee_exchange_rate_for` takes another lifetime), after which a fee in that asset is refused with `SignerError::FeeExchangeRateExpired` until the rate is set again. In a browser build the SDK has no clock, and a rate set by hand does not age |
 | Sends | No asset is a default, so a send names its asset: `Signer::send`, which assumes the policy asset, is refused with `SignerError::AssetUnnamed`. Use `Signer::send_asset` |
-| Simplicity budget | A spend earns four weight units of execution budget per byte of its witness, plus 50, up to 4,000,050; Elements gives one. An annex of up to 100,000 bytes relays on a Simplicity leaf. The signer pads a program that costs more than its witness earns (see below) |
+| Simplicity budget | A spend earns four weight units of execution budget per byte of its witness, plus 50, up to 4,000,050; Elements gives one. An annex relays on a Simplicity leaf only when it is zeros, at most 100,000 bytes, and exactly as large as the program's cost needs. The signer pads a program that costs more than its witness earns with that annex (see below) |
 | Change | Explicit. It is blinded only when the transaction spends a confidential input and has no other blinded output, because it cannot balance otherwise. An output is confidential only when the holder asks for it with a blinding key. Change is kept when the node would relay it and added to the fee only when it would not: see below |
 | Keys | The signer keeps contract keys apart from wallet keys. Its wallet keys, under `m/84h/{coin}h/0h`, hold its funding and change and sign its own inputs. Simplicity programs and tapscript leaves are signed with contract keys under `m/8383h/{coin}h/0h` (`CONTRACT_KEY_PURPOSE`); `Signer::get_schnorr_public_key` is the one at `0/0` there, and an input's `derivation_path` is read relative to whichever account its kind uses. A contract key signs the transaction's signature hash or a tagged hash of it; it signs a `SigMessage::Custom` message only for a program declared with `Program::with_custom_sig_message`, and refuses otherwise with `SignerError::CustomSigMessageUndeclared` |
 | Reissuance | Explicit tokens, Sequentia's default, reissue: the input's nonce is the token's asset blinding factor for a confidential token and the fixed non-null value one for an explicit token (`EXPLICIT_TOKEN_REISSUANCE_NONCE`), which the node accepts as the reissuance flag. A null nonce would make the node read a new issuance |
@@ -137,9 +137,12 @@ when that bound fits the budget its input's witness earns. Before it signs a
 spend, the signer finalizes every program, compares each cost bound with the
 budget its witness stack earns under the network's rule
 (`SimplicityNetwork::simplicity_budget`), and pads a program that falls short
-with the smallest annex that covers it: a last witness item tagged `0x50`, which
-the program never reads. Beyond the largest annex that relays, it refuses the
-spend with `SignerError::Budget`.
+with the smallest annex that covers it: a last witness item tagged `0x50` and
+zeros, which the program never reads. That is the only annex a Sequentia node
+relays: one byte larger, or an annex on a spend whose witness already pays for
+its program, is refused as larger than the program's cost needs. Beyond the
+largest annex that relays, the signer refuses the spend with
+`SignerError::Budget`.
 
 A full signature hash commits to every input's annex, so the signer fixes every
 annex first and signs after: one pass learns each program's cost and size,
