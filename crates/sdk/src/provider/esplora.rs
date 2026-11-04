@@ -156,15 +156,15 @@ impl ProviderTrait for EsploraProvider {
         let url = format!("{}/tx/{}/status", self.esplora_url, txid);
         let timeout_secs = self.timeout.as_secs();
 
-        let confirmation_poll = match self.network {
-            SimplicityNetwork::ElementsRegtest { .. } | SimplicityNetwork::SequentiaRegtest { .. } => {
-                Duration::from_millis(100)
-            }
-            _ => Duration::from_secs(10),
+        // A local chain has the block at once; a live network confirms within a few of its block
+        // intervals, so it is asked every few seconds for up to ten minutes.
+        let (confirmation_poll, tries) = if self.network.is_regtest() {
+            (Duration::from_millis(100), 9)
+        } else {
+            (Duration::from_secs(5), 120)
         };
 
-        // polling needs to be > 1 min on mainnet/testnet
-        for _ in 1..10 {
+        for _ in 0..tries {
             let response = minreq::get(&url)
                 .with_timeout(timeout_secs)
                 .send()
