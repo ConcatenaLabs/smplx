@@ -145,6 +145,13 @@ impl SimplicityNetwork {
         matches!(self, Self::SequentiaTestnet | Self::SequentiaRegtest { .. })
     }
 
+    /// Whether this is a local test chain, on which a block is mined at will rather than
+    /// awaited.
+    #[must_use]
+    pub fn is_regtest(&self) -> bool {
+        matches!(self, Self::ElementsRegtest { .. } | Self::SequentiaRegtest { .. })
+    }
+
     /// Refuses any network but Sequentia's.
     ///
     /// # Errors
@@ -342,5 +349,18 @@ mod tests {
             assert_eq!(refused, UnsupportedNetwork(network));
             assert!(refused.to_string().contains("Sequentia's transaction encoding only"));
         }
+    }
+
+    #[test]
+    fn only_regtest_networks_mine_on_broadcast() {
+        let sequentia_regtest = SimplicityNetwork::SequentiaRegtest {
+            policy_asset: SimplicityNetwork::SequentiaTestnet.policy_asset(),
+            genesis_hash: SimplicityNetwork::SequentiaTestnet.genesis_block_hash(),
+        };
+
+        assert!(sequentia_regtest.is_regtest());
+        assert!(SimplicityNetwork::default_regtest().is_regtest());
+        assert!(!SimplicityNetwork::SequentiaTestnet.is_regtest());
+        assert!(!SimplicityNetwork::Liquid.is_regtest());
     }
 }

@@ -71,7 +71,13 @@ created under `target/simplex`, or under `SIMPLEX_REGTEST_DIR` when it is set.
 credentials. To point `simplex test` at a node that is already running, give
 `[test.rpc]`; the network is read from the node, whatever `[regtest]` says, and a
 node that is not Sequentia's is refused. This is also how to run on the testnet:
-point `[test.rpc]` at a testnet node, which supplies the fee exchange rates. An
+point `[test.rpc]` at a testnet node, which supplies the fee exchange rates. A
+block is mined after each broadcast only on a regtest chain; on the testnet a
+test waits for the network's own blocks, up to ten minutes for each
+confirmation. Nothing funds the signer there: the address of `[test]`'s
+`mnemonic` (`Signer::get_address`, the wallet key at `m/84h/1h/0h/0/0`) must
+already hold the coins a test spends. Tests that share that mnemonic spend the
+same coins, so run them one at a time (`simplex test basic_test`). An
 `[test.esplora]` alone names its network, and the only one accepted is
 `SequentiaTestnet`; with no node beside it, it has no exchange rates, so fees need
 `with_fee_exchange_rate`.
