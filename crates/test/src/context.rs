@@ -57,7 +57,7 @@ impl TestContext {
                     self._provider_info.elements_url.clone().unwrap(),
                     self._provider_info.auth.clone().unwrap(),
                     *self.get_network(),
-                    true,
+                    self.get_network().is_regtest(),
                 )
                 .expect("the node answered when the context was set up"),
             )
@@ -198,11 +198,13 @@ impl TestContext {
             },
             None => match (config.rpc.clone(), config.to_regtest_config()) {
                 (Some(rpc), _) => {
-                    // an external node read over RPC alone; the chain is read from the node
+                    // an external node read over RPC alone; the chain is read from the node,
+                    // and a block is mined after a broadcast only on a regtest chain
                     let auth = Auth::UserPass(rpc.username, rpc.password);
                     let network = Self::network_from_node(&rpc.url, &auth)?;
                     let provider = Box::new(
-                        RpcProvider::new(rpc.url.clone(), auth.clone(), network, true).map_err(ProviderError::from)?,
+                        RpcProvider::new(rpc.url.clone(), auth.clone(), network, network.is_regtest())
+                            .map_err(ProviderError::from)?,
                     );
 
                     provider_info = ProviderInfo {

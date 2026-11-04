@@ -20,12 +20,21 @@ use super::error::RpcError;
 /// Confirmation targets reported by [`RpcProvider::fetch_fee_estimates`].
 const FEE_TARGETS: [u32; 7] = [1, 2, 3, 6, 12, 25, 144];
 
+/// How often [`RpcProvider`] asks a live network's node whether a transaction is confirmed.
+const LIVE_CONFIRMATION_POLL: Duration = Duration::from_secs(2);
+
+/// How long [`RpcProvider`] waits for a confirmation on a live network: ten block intervals of
+/// the Sequentia testnet.
+const LIVE_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// A provider backed by a node's JSON-RPC interface alone, with no indexer.
 ///
 /// Unspent outputs are found with `scantxoutset`, which reads the node's UTXO set, so an
 /// output appears once it is confirmed. Transactions are read with `getrawtransaction`, which
 /// needs `-txindex=1` for any transaction that is not the node wallet's own. With
-/// `mine_on_broadcast` set, every broadcast is followed by one block, as on a local regtest.
+/// `mine_on_broadcast` set, every broadcast is followed by one block, as on a local regtest;
+/// set it only for a regtest network. On a live network, [`ProviderTrait::wait`] waits for the
+/// network's own blocks, up to ten minutes.
 #[derive(Debug)]
 pub struct RpcProvider {
     /// The node's RPC client.
@@ -105,14 +114,25 @@ impl ProviderTrait for RpcProvider {
     }
 
     fn wait(&self, txid: &Txid) -> Result<(), ProviderError> {
-        for _ in 0..100 {
+        // A local chain has the block at once when it mines on broadcast; a live network
+        // confirms within a few of its block intervals.
+        let (poll, tries) = if self.network.is_regtest() {
+            (Duration::from_millis(100), 100)
+        } else {
+            (
+                LIVE_CONFIRMATION_POLL,
+                LIVE_CONFIRMATION_TIMEOUT.as_secs() / LIVE_CONFIRMATION_POLL.as_secs(),
+            )
+        };
+
+        for _ in 0..tries {
             if let Ok(tx) = self.call("getrawtransaction", &[txid.to_string().into(), true.into()])
                 && tx["confirmations"].as_u64().unwrap_or(0) >= 1
             {
                 return Ok(());
             }
 
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(poll);
         }
 
         Err(ProviderError::Confirmation())
